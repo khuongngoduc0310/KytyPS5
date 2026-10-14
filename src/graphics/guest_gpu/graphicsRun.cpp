@@ -94,6 +94,9 @@ bool GuestGpu::IsStopping() {
 }
 
 void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
+	if (m_renderer.GetGraphics().vulkan_fault.IsDeviceLost()) {
+		return;
+	}
 	EXIT_IF(!command);
 	if (IsGpuThread()) {
 		command();
@@ -108,6 +111,9 @@ void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
 
 void GuestGpu::ProcessCommands() {
 	EXIT_IF(!IsGpuThread());
+	if (m_renderer.GetGraphics().vulkan_fault.IsDeviceLost()) {
+		return;
+	}
 	while (m_pending_commands.load(std::memory_order_acquire) != 0) {
 		Common::UniqueFunction<void> command;
 		{
@@ -122,6 +128,9 @@ void GuestGpu::ProcessCommands() {
 }
 
 void GuestGpu::SendCommandSync(Common::UniqueFunction<void>&& command) {
+	if (m_renderer.GetGraphics().vulkan_fault.IsDeviceLost()) {
+		return;
+	}
 	EXIT_IF(!command);
 	Performance::Add(Performance::Counter::SynchronousCommandLaneCalls);
 	if (IsGpuThread()) {
@@ -425,6 +434,9 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 }
 
 void GuestGpu::Enqueue(Submission submission) {
+	if (m_renderer.GetGraphics().vulkan_fault.IsDeviceLost()) {
+		return;
+	}
 	EXIT_IF(submission.queue_id >= QueueCount);
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
@@ -437,6 +449,9 @@ void GuestGpu::Enqueue(Submission submission) {
 }
 
 void GuestGpu::WaitForIdle() {
+	if (m_renderer.GetGraphics().vulkan_fault.IsDeviceLost()) {
+		return;
+	}
 	EXIT_IF(IsGpuThread() || CommandScheduler::InDeferredOperation());
 	Common::LockGuard lock(m_queue_mutex);
 	while (m_processing || !m_commands.empty() || m_submission_count != 0) {
@@ -463,7 +478,20 @@ void GuestGpu::ThreadRun(void* data) {
 				gpu->m_idle.Signal();
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
-			if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
+			if (gpu->m_renderer.GetGraphics().vulkan_fault.IsDeviceLost()) {
+				gpu->m_accepting = false;
+				gpu->m_stopping  = true;
+				gpu->m_commands.clear();
+				for (auto& queue: gpu->m_queues) {
+					queue.clear();
+				}
+				gpu->m_submission_count = 0;
+				gpu->m_pending_commands.store(0, std::memory_order_release);
+				gpu->m_processing = false;
+				gpu->m_idle.SignalAll();
+				should_stop = true;
+			} else if (gpu->m_stopping && gpu->m_commands.empty() &&
+			           gpu->m_submission_count == 0) {
 				gpu->m_processing = false;
 				gpu->m_idle.SignalAll();
 				should_stop = true;
@@ -506,7 +534,9 @@ void GuestGpu::ThreadRun(void* data) {
 			}
 		}
 		if (should_stop) {
-			gpu->m_gfx_cp->BufferWait();
+			if (!gpu->m_renderer.GetGraphics().vulkan_fault.IsDeviceLost()) {
+				gpu->m_gfx_cp->BufferWait();
+			}
 			g_gpu_state  = nullptr;
 			g_gpu_thread = false;
 			return;

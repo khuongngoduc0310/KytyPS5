@@ -1068,7 +1068,16 @@ WindowContext::~WindowContext() {
 	render_context.reset();
 
 	if (graphic_ctx.device != nullptr) {
-		RequireVulkanSuccess(graphic_ctx.device.waitIdle(), "wait for Vulkan device shutdown");
+		if (!graphic_ctx.vulkan_fault.IsDeviceLost()) {
+			const auto result = graphic_ctx.device.waitIdle();
+			if (result == vk::Result::eErrorDeviceLost) {
+				RecordVulkanDeviceLoss(graphic_ctx,
+				                       {.operation = VulkanOperation::DeviceIdle,
+				                        .result = result});
+			} else {
+				RequireVulkanSuccess(result, "wait for Vulkan device shutdown");
+			}
+		}
 		graphic_ctx.DestroyAllocator();
 		graphic_ctx.device.destroy(nullptr);
 		graphic_ctx.device = nullptr;

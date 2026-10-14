@@ -14,7 +14,12 @@
 namespace Performance {
 
 enum class CaptureState : uint8_t { Disabled, Warmup, Collecting, Complete, Flushed };
-enum class CompletionReason : uint8_t { Complete, ShutdownPartial, QuickExitPartial };
+enum class CompletionReason : uint8_t {
+	Complete,
+	ShutdownPartial,
+	QuickExitPartial,
+	DeviceLost,
+};
 enum class PresentationClass : uint8_t { Guest, Repeat, Blank, Paused, OverlayOnly, Failed };
 enum class SchedulerDomain : uint8_t { Guest, Presentation };
 enum class WaitReason : uint8_t {
@@ -213,6 +218,7 @@ void SetGauge(Gauge metric, uint64_t value) noexcept;
 void MaxGauge(Gauge metric, uint64_t value) noexcept;
 void Observe(Duration metric, uint64_t nanoseconds) noexcept;
 void RecordWait(WaitReason reason, uint64_t blocked_nanoseconds) noexcept;
+void RecordDeviceLoss(const char* operation, int result, uint64_t tick, uint8_t domain) noexcept;
 void ObserveWait(WaitReason reason, uint64_t nanoseconds) noexcept;
 void Presentation(PresentationClass classification, uint64_t cpu_nanoseconds) noexcept;
 void SetMetadata(const Metadata& metadata);

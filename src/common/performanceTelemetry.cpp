@@ -13,6 +13,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
 #include <utility>
@@ -185,7 +186,14 @@ struct Collector {
 	std::array<AtomicDuration, kDurationCount> durations{};
 	std::atomic<bool> publication_claimed{false};
 	std::atomic<bool> warning_emitted{false};
+	std::atomic<bool> device_lost{false};
+	std::atomic<int> device_loss_result{0};
+	std::atomic<uint64_t> device_loss_tick{0};
+	std::atomic<uint8_t> device_loss_domain{0};
 };
+
+std::mutex g_device_loss_mutex;
+std::string g_device_loss_operation;
 
 Collector g_collector;
 CaptureOptions g_options;
@@ -298,6 +306,8 @@ const char* CompletionReasonName(CompletionReason reason) {
 		return "shutdown_partial";
 	case CompletionReason::QuickExitPartial:
 		return "quick_exit_partial";
+	case CompletionReason::DeviceLost:
+		return "device_lost";
 	}
 	return "unknown";
 }
@@ -335,6 +345,19 @@ Json BuildJson(CompletionReason reason) {
 	root["schema_version"]    = 1;
 	root["completion_reason"] = CompletionReasonName(reason);
 	root["capture_state"]     = StateName(g_collector.state.load(std::memory_order_relaxed));
+	root["device_loss"] = [&] {
+		Json loss;
+		const bool detected = g_collector.device_lost.load(std::memory_order_relaxed);
+		loss["detected"] = detected;
+		if (detected) {
+			std::lock_guard lock(g_device_loss_mutex);
+			loss["operation"] = g_device_loss_operation;
+			loss["result"]    = g_collector.device_loss_result.load(std::memory_order_relaxed);
+			loss["tick"]      = g_collector.device_loss_tick.load(std::memory_order_relaxed);
+			loss["domain"]    = g_collector.device_loss_domain.load(std::memory_order_relaxed);
+		}
+		return loss;
+	}();
 	root["capture"]           = {
 	    {"warmup_frames", g_options.warmup_frames},
 	    {"capture_frames", g_options.capture_frames},
@@ -482,6 +505,14 @@ void ResetCollector() {
 	}
 	g_collector.publication_claimed.store(false, std::memory_order_relaxed);
 	g_collector.warning_emitted.store(false, std::memory_order_relaxed);
+	g_collector.device_lost.store(false, std::memory_order_relaxed);
+	g_collector.device_loss_result.store(0, std::memory_order_relaxed);
+	g_collector.device_loss_tick.store(0, std::memory_order_relaxed);
+	g_collector.device_loss_domain.store(0, std::memory_order_relaxed);
+	{
+		std::lock_guard lock(g_device_loss_mutex);
+		g_device_loss_operation.clear();
+	}
 	g_host_cpu.clear();
 	g_metadata.store(nullptr, std::memory_order_relaxed);
 }
@@ -605,7 +636,10 @@ void Shutdown() {
 	WaitForProducers();
 	const bool complete = previous == CaptureState::Complete ||
 	                      (previous == CaptureState::Collecting && g_options.capture_frames == 0);
-	PublishReport(complete ? CompletionReason::Complete : CompletionReason::ShutdownPartial);
+	const auto reason = g_collector.device_lost.load(std::memory_order_acquire)
+	                       ? CompletionReason::DeviceLost
+	                       : (complete ? CompletionReason::Complete : CompletionReason::ShutdownPartial);
+	PublishReport(reason);
 }
 
 void EmergencyShutdown() {
@@ -615,8 +649,10 @@ void EmergencyShutdown() {
 	}
 	g_collector.enabled.store(false, std::memory_order_release);
 	g_collector.state.store(CaptureState::Flushed, std::memory_order_release);
-	PublishReport(state == CaptureState::Complete ? CompletionReason::Complete
-	                                              : CompletionReason::QuickExitPartial);
+	PublishReport(g_collector.device_lost.load(std::memory_order_acquire)
+	                 ? CompletionReason::DeviceLost
+	                 : (state == CaptureState::Complete ? CompletionReason::Complete
+	                                                    : CompletionReason::QuickExitPartial));
 }
 
 bool Enabled() noexcept { return g_collector.enabled.load(std::memory_order_relaxed); }
@@ -676,6 +712,16 @@ void RecordWait(WaitReason reason, uint64_t blocked_nanoseconds) noexcept {
 		ObserveEntered(WaitDuration(reason), blocked_nanoseconds);
 	}
 	LeaveProducer();
+}
+
+void RecordDeviceLoss(const char* operation, int result, uint64_t tick, uint8_t domain) noexcept {
+	if (!g_collector.device_lost.exchange(true, std::memory_order_acq_rel)) {
+		g_collector.device_loss_result.store(result, std::memory_order_relaxed);
+		g_collector.device_loss_tick.store(tick, std::memory_order_relaxed);
+		g_collector.device_loss_domain.store(domain, std::memory_order_relaxed);
+		std::lock_guard lock(g_device_loss_mutex);
+		g_device_loss_operation = operation != nullptr ? operation : "unknown";
+	}
 }
 
 void ObserveWait(WaitReason reason, uint64_t nanoseconds) noexcept {

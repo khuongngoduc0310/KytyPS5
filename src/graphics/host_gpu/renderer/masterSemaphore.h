@@ -13,7 +13,8 @@ struct GraphicContext;
 
 class MasterSemaphore {
 public:
-	explicit MasterSemaphore(GraphicContext& graphics);
+	explicit MasterSemaphore(GraphicContext& graphics,
+	                         Performance::SchedulerDomain domain = Performance::SchedulerDomain::Guest);
 	~MasterSemaphore();
 	KYTY_CLASS_NO_COPY(MasterSemaphore);
 
@@ -29,12 +30,14 @@ public:
 	}
 	[[nodiscard]] vk::Semaphore Handle() const noexcept { return m_semaphore; }
 
-	void Refresh();
-	void Wait(uint64_t tick, Performance::WaitReason reason = Performance::WaitReason::Generic);
+	[[nodiscard]] bool Refresh();
+	[[nodiscard]] bool Wait(uint64_t tick,
+	                        Performance::WaitReason reason = Performance::WaitReason::Generic);
 
 private:
-	GraphicContext&       m_graphics;
-	vk::Semaphore         m_semaphore = nullptr;
+	GraphicContext&                 m_graphics;
+	Performance::SchedulerDomain    m_domain;
+	vk::Semaphore                   m_semaphore = nullptr;
 	std::atomic<uint64_t> m_gpu_tick {0};
 	std::atomic<uint64_t> m_current_tick {1};
 };

@@ -32,6 +32,7 @@ public:
 	                                               CommandBuffer* producer = nullptr);
 	[[nodiscard]] bool           PresentLastFrame(Performance::PresentationClass classification);
 	[[nodiscard]] bool           IsGuestPaused() const noexcept;
+	[[nodiscard]] bool           IsDeviceLost() const noexcept;
 	[[nodiscard]] bool           NeedsSystemOverlayRefresh() const noexcept;
 	[[nodiscard]] RenderContext& Renderer() const noexcept;
 	[[nodiscard]] bool Present(Frame& frame, Performance::PresentationClass classification);

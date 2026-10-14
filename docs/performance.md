@@ -57,12 +57,13 @@ Only guest frames contribute `frames.guest` and `frames.guest_interval`.
 Top-level fields:
 
 - `schema_version`: compatibility version; consumers must reject unsupported versions.
-- `completion_reason`: `complete`, `shutdown_partial`, or `quick_exit_partial`.
+- `completion_reason`: `complete`, `shutdown_partial`, `quick_exit_partial`, or `device_lost`.
 - `capture`: requested window, captured guest-frame count, bounded state, and Tracy state.
 - `metadata`: build revision/label, OS, CPU, title ID, GPU device, and GPU driver.
 - `frame_classifications`: presentation totals by class.
 - `metrics`: fixed metric catalog.
 - `sample_loss`: unsupported GPU timing, query exhaustion, unavailable results, and pending samples.
+- `device_loss`: terminal Vulkan failure status. When detected, includes first operation, result, scheduler domain, and tick.
 
 Metric kinds:
 
@@ -114,6 +115,6 @@ GPU duration absence is not equivalent to zero work. Check `sample_loss` before 
 
 ## Publication and privacy
 
-Report publication writes a sibling `.tmp` file, flushes it, then replaces destination. Write failures log once and do not terminate emulation. Normal shutdown completes an unlimited capture. Stopping before a bounded target reports `shutdown_partial`; quick exit reports `quick_exit_partial`. Completed bounded captures retain `complete`.
+Report publication writes a sibling `.tmp` file, flushes it, then replaces destination. Write failures log once and do not terminate emulation. Normal shutdown completes an unlimited capture. Stopping before a bounded target reports `shutdown_partial`; quick exit reports `quick_exit_partial`. Device loss reports `device_lost` and preserves first-failure metadata. Completed bounded captures retain `complete`.
 
 Reports contain aggregate performance data and listed host/build/title metadata. They do not contain guest memory, shader source, command streams, screenshots, input events, file paths, account data, or per-frame raw samples. Review title and hardware metadata before sharing reports publicly.

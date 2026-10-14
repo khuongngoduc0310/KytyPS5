@@ -740,6 +740,11 @@ void WindowContext::Run() {
 	auto               title_frames      = loop.presented_frames.load(std::memory_order_relaxed);
 
 	while (!loop.need_exit) {
+		if (graphic_ctx.vulkan_fault.IsDeviceLost()) {
+			SDL_SetWindowTitle(window, "KytyPS5 - Vulkan device lost");
+			loop.need_exit = true;
+			break;
+		}
 		if (loop.paused.load(std::memory_order_acquire)) {
 			if (!timer.IsPaused()) {
 				timer.Pause();

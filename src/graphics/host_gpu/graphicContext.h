@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
+#include "graphics/host_gpu/vulkanFault.h"
 
 #include <map>
 #include <mutex>
@@ -42,6 +43,7 @@ struct GraphicContext {
 	uint32_t                           max_push_descriptors                  = 0;
 	vk::ShaderStageFlags               required_subgroup_size_stages         = {};
 	Common::Mutex                      queue_mutex;
+	VulkanFaultState                   vulkan_fault;
 	uint32_t                           queue_family = static_cast<uint32_t>(-1);
 	uint32_t                           queue_timestamp_valid_bits = 0;
 	float                              timestamp_period_nanoseconds = 0.0f;

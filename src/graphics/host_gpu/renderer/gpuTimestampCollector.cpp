@@ -18,7 +18,11 @@ GpuTimestampCollector::GpuTimestampCollector(GraphicContext& graphics, MasterSem
 	vk::QueryPoolCreateInfo create{};
 	create.queryType  = vk::QueryType::eTimestamp;
 	create.queryCount = QueryPairCount * 2;
-	if (graphics.device.createQueryPool(&create, nullptr, &m_pool) != vk::Result::eSuccess) {
+	const auto result = graphics.device.createQueryPool(&create, nullptr, &m_pool);
+	if (result != vk::Result::eSuccess) {
+		RecordVulkanDeviceLoss(graphics,
+		                       {.operation = VulkanOperation::Create, .result = result,
+		                        .domain = static_cast<uint8_t>(domain)});
 		m_pool = nullptr;
 	}
 }
@@ -116,6 +120,15 @@ void GpuTimestampCollector::Collect() {
 		const auto result = m_graphics.device.getQueryPoolResults(
 		    m_pool, token * 2, 2, sizeof(results), results.data(), sizeof(QueryResult),
 		    vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
+		if (result == vk::Result::eErrorDeviceLost) {
+			RecordVulkanDeviceLoss(m_graphics,
+			                       {.operation = VulkanOperation::Query,
+			                        .result = result,
+			                        .domain = static_cast<uint8_t>(m_domain),
+			                        .tick = slot.tick});
+			Release(token);
+			return;
+		}
 		if (result != vk::Result::eSuccess || results[0].available == 0 ||
 		    results[1].available == 0) {
 			Performance::Add(Performance::Counter::GpuUnavailableResults);
@@ -143,7 +156,15 @@ void GpuTimestampCollector::Drain() {
 	if (m_pool == nullptr) {
 		return;
 	}
-	m_master.Refresh();
+	if (!m_master.Refresh()) {
+		for (Token token = 0; token < QueryPairCount; token++) {
+			if (m_slots[token].state != SlotState::Free) {
+				Performance::Add(Performance::Counter::GpuUnavailableResults);
+				Release(token);
+			}
+		}
+		return;
+	}
 	Collect();
 	for (Token token = 0; token < QueryPairCount; token++) {
 		if (m_slots[token].state != SlotState::Free) {

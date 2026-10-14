@@ -45,7 +45,9 @@ public:
 	FramePool(WindowContext& window, CommandScheduler& scheduler)
 	    : m_window(window), m_scheduler(scheduler) {}
 	~FramePool() {
-		m_scheduler.Wait(m_scheduler.CurrentTick() - 1, Performance::WaitReason::Shutdown);
+		if (!m_window.graphic_ctx.vulkan_fault.IsDeviceLost()) {
+			(void)m_scheduler.Wait(m_scheduler.CurrentTick() - 1, Performance::WaitReason::Shutdown);
+		}
 		for (auto& frame: m_frames) {
 			m_window.graphic_ctx.device.destroyImageView(frame->view, nullptr);
 			if (frame->image.image != nullptr) {
@@ -116,7 +118,9 @@ public:
 		frame->busy = true;
 		m_mutex.Unlock();
 
-		m_scheduler.Wait(frame->present_tick, Performance::WaitReason::FramePoolReuse);
+		if (!m_window.graphic_ctx.vulkan_fault.IsDeviceLost()) {
+			(void)m_scheduler.Wait(frame->present_tick, Performance::WaitReason::FramePoolReuse);
+		}
 		return frame;
 	}
 
@@ -261,7 +265,7 @@ void Presenter::Frame::Clear(CommandBuffer& command_buffer, const vk::ClearColor
 
 class Swapchain final {
 public:
-	enum class Status : uint8_t { Success, Recreate, SurfaceLost };
+	enum class Status : uint8_t { Success, Recreate, SurfaceLost, DeviceLost };
 
 	explicit Swapchain(WindowContext& window): m_window(window) {}
 	~Swapchain();
@@ -274,7 +278,7 @@ public:
 	[[nodiscard]] bool   PrepareSystemOverlay();
 	void     RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
 	                               const Presenter::Layer& overlay, bool draw_system_overlay);
-	uint64_t Submit(CommandScheduler& scheduler);
+	[[nodiscard]] std::optional<uint64_t> Submit(CommandScheduler& scheduler);
 	[[nodiscard]] Status Present();
 
 	[[nodiscard]] uint32_t ImageCount() const noexcept {
@@ -317,6 +321,9 @@ struct Presenter::Impl {
 	}
 
 	void RecoverSwapchain(Swapchain::Status status) {
+		if (status == Swapchain::Status::DeviceLost || window.graphic_ctx.vulkan_fault.IsDeviceLost()) {
+			return;
+		}
 		LOGF("Recovering Vulkan swapchain%s\n",
 		     status == Swapchain::Status::SurfaceLost ? " and surface" : "");
 		swapchain.Recreate(status == Swapchain::Status::SurfaceLost);
@@ -498,9 +505,15 @@ void Swapchain::Destroy() {
 	}
 	auto& graphics = m_window.graphic_ctx;
 
-	{
+	if (!graphics.vulkan_fault.IsDeviceLost()) {
 		Common::LockGuard queue_lock(graphics.queue_mutex);
-		RequireVulkanSuccess(graphics.queue.waitIdle(), "wait for swapchain queue");
+		const auto result = graphics.queue.waitIdle();
+		if (result == vk::Result::eErrorDeviceLost) {
+			RecordVulkanDeviceLoss(graphics,
+			                       {.operation = VulkanOperation::QueueIdle, .result = result});
+		} else {
+			RequireVulkanSuccess(result, "wait for swapchain queue");
+		}
 	}
 	if (m_system_overlay != nullptr) {
 		m_system_overlay->ReleaseVulkan();
@@ -569,6 +582,9 @@ bool Swapchain::NeedsResize() const {
 }
 
 Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
+	if (m_window.graphic_ctx.vulkan_fault.IsDeviceLost()) {
+		return Status::DeviceLost;
+	}
 	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
 	// Binary acquire semaphores cannot be reused while their previous queue wait is pending.
 	// The presentation timeline signal follows that wait, so retire this slot before reuse.
@@ -594,6 +610,14 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 		case vk::Result::eErrorSurfaceLostKHR:
 			LOGF("vkAcquireNextImageKHR returned vk::Result::eErrorSurfaceLostKHR\n");
 			return Status::SurfaceLost;
+		case vk::Result::eErrorDeviceLost:
+			RecordVulkanDeviceLoss(m_window.graphic_ctx,
+			                       {.operation = VulkanOperation::Acquire,
+			                        .result = result,
+			                        .domain = static_cast<uint8_t>(Performance::SchedulerDomain::Presentation),
+			                        .frame_index = m_frame_index,
+			                        .has_frame_index = true});
+			return Status::DeviceLost;
 		default: EXIT("vkAcquireNextImageKHR failed: %s\n", vk::to_string(result).c_str());
 	}
 	EXIT_IF(m_image_index >= m_images.size());
@@ -845,17 +869,25 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	}
 }
 
-uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
+std::optional<uint64_t> Swapchain::Submit(CommandScheduler& scheduler) {
+	if (m_window.graphic_ctx.vulkan_fault.IsDeviceLost()) {
+		return std::nullopt;
+	}
 	EXIT_IF(m_frame_index >= m_image_acquired.size() || m_image_index >= m_render_complete.size());
 	SubmitInfo submit;
 	submit.AddWait(m_image_acquired[m_frame_index], 1, vk::PipelineStageFlagBits::eTransfer);
 	submit.AddSignal(m_render_complete[m_image_index]);
 	const auto tick = scheduler.Submit(submit);
-	m_image_acquired_ticks[m_frame_index] = tick;
+	if (tick) {
+		m_image_acquired_ticks[m_frame_index] = *tick;
+	}
 	return tick;
 }
 
 Swapchain::Status Swapchain::Present() {
+	if (m_window.graphic_ctx.vulkan_fault.IsDeviceLost()) {
+		return Status::DeviceLost;
+	}
 	EXIT_IF(m_image_index >= m_render_complete.size());
 	const auto         ready = m_render_complete[m_image_index];
 	vk::PresentInfoKHR present {};
@@ -882,6 +914,14 @@ Swapchain::Status Swapchain::Present() {
 		case vk::Result::eErrorSurfaceLostKHR:
 			LOGF("vkQueuePresentKHR returned vk::Result::eErrorSurfaceLostKHR\n");
 			return Status::SurfaceLost;
+		case vk::Result::eErrorDeviceLost:
+			RecordVulkanDeviceLoss(m_window.graphic_ctx,
+			                       {.operation = VulkanOperation::Present,
+			                        .result = result,
+			                        .domain = static_cast<uint8_t>(Performance::SchedulerDomain::Presentation),
+			                        .frame_index = m_frame_index,
+			                        .has_frame_index = true});
+			return Status::DeviceLost;
 		default: EXIT("vkQueuePresentKHR failed: %s\n", vk::to_string(result).c_str());
 	}
 	m_frame_index = (m_frame_index + 1u) % static_cast<uint32_t>(m_images.size());
@@ -928,12 +968,17 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	} else {
 		auto& command = m_impl->present_scheduler.BeginCommand();
 		frame->Clear(command, clear);
-		frame->present_tick = m_impl->present_scheduler.Submit();
+		if (const auto tick = m_impl->present_scheduler.Submit()) {
+			frame->present_tick = *tick;
+		}
 	}
 	return *frame;
 }
 
 bool Presenter::PresentLastFrame(Performance::PresentationClass classification) {
+	if (IsDeviceLost()) {
+		return false;
+	}
 	Common::LockGuard lock(m_impl->present_mutex);
 	if (m_impl->layers[0].frame == nullptr && m_impl->layers[1].frame == nullptr) {
 		return false;
@@ -943,6 +988,10 @@ bool Presenter::PresentLastFrame(Performance::PresentationClass classification) 
 
 bool Presenter::IsGuestPaused() const noexcept {
 	return m_impl->window.loop.paused.load(std::memory_order_acquire);
+}
+
+bool Presenter::IsDeviceLost() const noexcept {
+	return m_impl->window.graphic_ctx.vulkan_fault.IsDeviceLost();
 }
 
 bool Presenter::NeedsSystemOverlayRefresh() const noexcept {
@@ -962,6 +1011,9 @@ bool Presenter::Present(Frame& frame, Performance::PresentationClass classificat
 
 bool Presenter::Present(std::span<const Layer> layers,
                         Performance::PresentationClass classification) {
+	if (IsDeviceLost()) {
+		return false;
+	}
 	Common::LockGuard lock(m_impl->present_mutex);
 	for (const auto& layer: layers) {
 		EXIT_IF(layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size()));
@@ -1005,6 +1057,9 @@ void Presenter::ClearLayer(int bus) {
 bool Presenter::Impl::Present() {
 	KYTY_PROFILER_FUNCTION();
 
+	if (window.graphic_ctx.vulkan_fault.IsDeviceLost()) {
+		return false;
+	}
 	const auto overlay_visual = GetSystemOverlayVisualState();
 	// Some window systems keep presenting an old swapchain after a resize.
 	if (swapchain.NeedsResize()) {
@@ -1013,6 +1068,9 @@ bool Presenter::Impl::Present() {
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
 		auto status = swapchain.AcquireNextImage(present_scheduler);
 		if (status != Swapchain::Status::Success) {
+			if (status == Swapchain::Status::DeviceLost) {
+				return false;
+			}
 			RecoverSwapchain(status);
 			continue;
 		}
@@ -1024,14 +1082,20 @@ bool Presenter::Impl::Present() {
 			swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
 			                                draw_system_overlay);
 			const auto tick = swapchain.Submit(present_scheduler);
+			if (!tick) {
+				return false;
+			}
 			for (const auto& layer: layers) {
 				if (layer.frame != nullptr) {
-					layer.frame->present_tick = tick;
+					layer.frame->present_tick = *tick;
 				}
 			}
 		}
 		status = swapchain.Present();
 		if (status != Swapchain::Status::Success) {
+			if (status == Swapchain::Status::DeviceLost) {
+				return false;
+			}
 			RecoverSwapchain(status);
 			continue;
 		}

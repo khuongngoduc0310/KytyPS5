@@ -214,6 +214,7 @@ public:
 	void Complete(uint64_t request_id);
 	void WaitForSubmitSlot(VideoOutConfig& cfg);
 	bool Flip(uint32_t micros);
+	void CancelDeviceLoss();
 	void GetFlipStatus(VideoOutConfig& cfg, VideoOutFlipStatus& out);
 	void Wait(VideoOutConfig& cfg, int index);
 
@@ -621,6 +622,9 @@ void VideoOutShutdown() {
 }
 
 VideoOutDriver::Impl::~Impl() {
+	if (m_presenter.IsDeviceLost()) {
+		m_flip_queue.CancelDeviceLoss();
+	}
 	if (m_present_thread.joinable()) {
 		m_present_thread.request_stop();
 		m_present_thread.join();
@@ -851,7 +855,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	EXIT_IF(frequency == 0);
 
 	int64_t total_wait = 0;
-	while (!token.stop_requested()) {
+	while (!token.stop_requested() && !m_presenter.IsDeviceLost()) {
 		const auto sleep_begin = Common::Timer::QueryPerformanceCounter();
 		if (total_wait > 0) {
 			const auto remaining_us =
@@ -859,7 +863,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			Common::Thread::SleepMicro(static_cast<uint32_t>(
 			    std::clamp<uint64_t>(remaining_us, 1, std::numeric_limits<uint32_t>::max())));
 		}
-		if (token.stop_requested()) {
+		if (token.stop_requested() || m_presenter.IsDeviceLost()) {
 			break;
 		}
 		const auto frame_begin = Common::Timer::QueryPerformanceCounter();
@@ -881,6 +885,9 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 
 		VblankBegin();
 		bool presented = m_flip_queue.Flip(0);
+		if (m_presenter.IsDeviceLost()) {
+			break;
+		}
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
 			if (m_presenter.PresentLastFrame(Performance::PresentationClass::OverlayOnly)) {
 				presented = true;
@@ -914,15 +921,24 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 				(void)m_presenter.Present(blank, Performance::PresentationClass::Blank);
 			}
 		}
+		if (m_presenter.IsDeviceLost()) {
+			break;
+		}
 		VblankEnd();
 
 		const auto frame_end = Common::Timer::QueryPerformanceCounter();
 		total_wait += static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
 	}
+	if (m_presenter.IsDeviceLost()) {
+		m_flip_queue.CancelDeviceLoss();
+	}
 }
 
 bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRequestSource source,
                         uint64_t& request_id) {
+	if (m_presenter.IsDeviceLost()) {
+		return false;
+	}
 	Common::LockGuard lock(m_mutex);
 
 	// A newer slave request replaces the one not yet captured by a master flip.
@@ -995,6 +1011,10 @@ FlipQueue::~FlipQueue() {
 }
 
 void FlipQueue::Cancel(VideoOutConfig& cfg) {
+	if (m_presenter.IsDeviceLost()) {
+		CancelDeviceLoss();
+		return;
+	}
 	std::vector<Graphics::Presenter::Frame*> frames;
 	m_mutex.Lock();
 	while (m_processing && std::any_of(m_requests.begin(), m_requests.end(), [&cfg](const auto& r) {
@@ -1066,6 +1086,11 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 		cfg            = request->cfg;
 		generation     = request->generation;
 		index          = request->index;
+	}
+
+	if (m_presenter.IsDeviceLost()) {
+		CancelDeviceLoss();
+		return;
 	}
 
 	const bool          special = IsSpecialBufferIndex(index);
@@ -1141,6 +1166,9 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 }
 
 void FlipQueue::Complete(uint64_t request_id) {
+	if (m_presenter.IsDeviceLost()) {
+		return;
+	}
 	m_mutex.Lock();
 	auto request = std::find_if(m_requests.begin(), m_requests.end(),
 	                            [request_id](const auto& r) { return r.id == request_id; });
@@ -1170,6 +1198,9 @@ void FlipQueue::Complete(uint64_t request_id) {
 }
 
 void FlipQueue::WaitForSubmitSlot(VideoOutConfig& cfg) {
+	if (m_presenter.IsDeviceLost()) {
+		return;
+	}
 	Common::LockGuard lock(m_mutex);
 	auto belongs_to_port = [&cfg](const auto& request) { return request.cfg == &cfg; };
 	while (std::count_if(m_requests.begin(), m_requests.end(), belongs_to_port) +
@@ -1183,6 +1214,9 @@ void FlipQueue::WaitForSubmitSlot(VideoOutConfig& cfg) {
 }
 
 void FlipQueue::Wait(VideoOutConfig& cfg, int index) {
+	if (m_presenter.IsDeviceLost()) {
+		return;
+	}
 	Common::LockGuard lock(m_mutex);
 
 	auto has_request = [this, &cfg, index] {
@@ -1195,9 +1229,46 @@ void FlipQueue::Wait(VideoOutConfig& cfg, int index) {
 	}
 }
 
+void FlipQueue::CancelDeviceLoss() {
+	std::vector<Graphics::Presenter::Frame*> frames;
+	std::vector<VideoOutConfig*> configs;
+	{
+		Common::LockGuard lock(m_mutex);
+		for (auto* queue: {&m_requests, &m_cpu_requests, &m_cancelled_requests}) {
+			for (auto& request: *queue) {
+				if (request.frame != nullptr) {
+					frames.push_back(request.frame);
+				}
+				if (request.cfg != nullptr &&
+				    std::find(configs.begin(), configs.end(), request.cfg) == configs.end()) {
+					configs.push_back(request.cfg);
+				}
+			}
+			queue->clear();
+		}
+		m_processing = false;
+		m_done_cond_var.SignalAll();
+		m_submit_slot_cond_var.SignalAll();
+		m_submit_cond_var.SignalAll();
+	}
+	for (auto* frame: frames) {
+		m_presenter.Discard(*frame);
+	}
+	for (auto* cfg: configs) {
+		Common::LockGuard lock(cfg->mutex);
+		cfg->flip_status.flipPendingNum = 0;
+		cfg->flip_status.gcQueueNum     = 0;
+		cfg->vblank_cond.SignalAll();
+	}
+}
+
 bool FlipQueue::Flip(uint32_t micros) {
 	KYTY_PROFILER_BLOCK("FlipQueue::Flip");
 
+	if (m_presenter.IsDeviceLost()) {
+		CancelDeviceLoss();
+		return false;
+	}
 	m_mutex.Lock();
 	if (m_requests.empty()) {
 		m_submit_cond_var.WaitFor(&m_mutex, micros);
@@ -1254,6 +1325,13 @@ bool FlipQueue::Flip(uint32_t micros) {
 		        : (IsSpecialBufferIndex(main_request->index) ? Performance::PresentationClass::Blank
 		                                                     : Performance::PresentationClass::Guest);
 		(void)m_presenter.Present(std::span(layers.data(), count), classification);
+	}
+	if (m_presenter.IsDeviceLost()) {
+		for (size_t i = count; i != 0; i--) {
+			requests[i - 1].cfg->mutex.Unlock();
+		}
+		CancelDeviceLoss();
+		return false;
 	}
 
 	m_mutex.Lock();
