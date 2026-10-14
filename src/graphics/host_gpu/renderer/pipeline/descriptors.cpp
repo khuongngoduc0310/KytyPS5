@@ -375,6 +375,13 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 	desc.view_info.usage      = binding == TextureCache::BindingType::Storage
 	                                ? vk::ImageUsageFlagBits::eStorage
 	                                : vk::ImageUsageFlagBits::eSampled;
+	if (resource.depth_compare) {
+		const auto* depth_format = FindGuestDepthFormatPolicy(desc.info.guest_format);
+		EXIT_IF(depth_format == nullptr);
+		desc.info.pixel_format = depth_format->depth_attachment_format;
+		desc.view_info.format  = depth_format->depth_attachment_format;
+		desc.view_info.aspect  = vk::ImageAspectFlagBits::eDepth;
+	}
 	desc.type                 = binding;
 	return desc;
 }
@@ -638,7 +645,8 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	desc.view_info.base_level = view_base;
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
 
-	auto       id                  = texture_cache.FindImage(desc, shader_conversion);
+	const bool exact_image_format = shader_conversion || resource.depth_compare;
+	auto       id                  = texture_cache.FindImage(desc, exact_image_format);
 	auto*      image               = &texture_cache.GetImage(id);
 	const bool stencil_association = static_cast<bool>(image->depth_id);
 	if (stencil_association) {
