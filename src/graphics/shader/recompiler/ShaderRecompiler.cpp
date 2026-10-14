@@ -829,7 +829,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 
 CompileResult CompileProgram(TranslateResult translated, const CompileOptions& options,
                              const IR::ResourceSpecialization& specialization,
-                             uint32_t push_data_start_dword) {
+                             uint32_t push_data_start_dword, std::span<const uint32_t> cached_spirv) {
 	const auto emit_begin = std::chrono::steady_clock::now();
 	auto& ir = translated.program;
 	IR::ApplyResourceSpecialization(ir, specialization);
@@ -883,12 +883,15 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 		}
 	}
 
-	LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " SPIR-V EmitProgram\n",
-	     GetDumpLabel(options), StageName(ir.stage), ir.shader_hash);
-	auto spirv = Spirv::EmitProgram(ir, options.input_info, push_data_start_dword);
-	LOGF("%s phase end: stage=%s hash=0x%016" PRIx64 " SPIR-V EmitProgram words=%" PRIu64
+	const auto* spirv_phase = cached_spirv.empty() ? "SPIR-V EmitProgram" : "SPIR-V cache";
+	LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " %s\n", GetDumpLabel(options),
+	     StageName(ir.stage), ir.shader_hash, spirv_phase);
+	auto spirv = cached_spirv.empty()
+	                 ? Spirv::EmitProgram(ir, options.input_info, push_data_start_dword)
+	                 : std::vector<uint32_t>(cached_spirv.begin(), cached_spirv.end());
+	LOGF("%s phase end: stage=%s hash=0x%016" PRIx64 " %s words=%" PRIu64
 	     " elapsed_ms=%" PRIu64 "\n",
-	     GetDumpLabel(options), StageName(ir.stage), ir.shader_hash,
+	     GetDumpLabel(options), StageName(ir.stage), ir.shader_hash, spirv_phase,
 	     static_cast<uint64_t>(spirv.size()),
 	     static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
 	                               std::chrono::steady_clock::now() - emit_begin)

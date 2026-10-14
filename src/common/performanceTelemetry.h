@@ -55,6 +55,8 @@ enum class Counter : uint16_t {
 	GlobalBarriers,
 	PresentationBarriers,
 	ShaderTranslations,
+	ShaderCacheHits,
+	ShaderCacheMisses,
 	SpirvCompilations,
 	ProgramPermutationHits,
 	ProgramPermutationMisses,

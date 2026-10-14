@@ -439,6 +439,13 @@ add_executable(performance_telemetry_tests EXCLUDE_FROM_ALL
 target_link_libraries(performance_telemetry_tests common Vulkan::Headers nlohmann_json::nlohmann_json)
 target_include_directories(performance_telemetry_tests PRIVATE ${inc_headers})
 
+add_executable(shader_module_cache_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ShaderModuleCacheTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaderModuleCache.cpp"
+)
+target_link_libraries(shader_module_cache_tests common xxhash)
+target_include_directories(shader_module_cache_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
@@ -626,6 +633,7 @@ if(BUILD_TESTING)
 	                 --performance-capture-frames 4294967296 --profile)
 	set_tests_properties(emulator_performance_numeric_overflow PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME performance_telemetry COMMAND $<TARGET_FILE:performance_telemetry_tests>)
+	add_test(NAME shader_module_cache COMMAND $<TARGET_FILE:shader_module_cache_tests>)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
@@ -715,6 +723,7 @@ if(BUILD_TESTING)
 		avplayer_file_tests
 		bit_array_tests
 		performance_telemetry_tests
+		shader_module_cache_tests
 		lru_cache_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests

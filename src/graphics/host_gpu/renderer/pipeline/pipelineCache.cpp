@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderModuleCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -29,6 +30,7 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <optional>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
@@ -72,15 +74,24 @@ vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front,
 	}
 }
 
-std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties) {
+std::string DeviceCacheSignature(std::string_view prefix,
+                                 const vk::PhysicalDeviceProperties& properties) {
 	constexpr char hex[] = "0123456789abcdef";
 	std::string    uuid(VK_UUID_SIZE * 2, '0');
 	for (size_t i = 0; i < VK_UUID_SIZE; i++) {
 		uuid[i * 2]     = hex[properties.pipelineCacheUUID[i] >> 4u];
 		uuid[i * 2 + 1] = hex[properties.pipelineCacheUUID[i] & 0xfu];
 	}
-	return fmt::format("KytyPC1:{}:{:08x}:{:08x}:{:08x}:{}\n", KYTY_GIT_REVISION,
+	return fmt::format("{}:{}:{:08x}:{:08x}:{:08x}:{}\n", prefix, KYTY_GIT_REVISION,
 	                   properties.vendorID, properties.deviceID, properties.driverVersion, uuid);
+}
+
+std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties) {
+	return DeviceCacheSignature("KytyPC1", properties);
+}
+
+std::string ShaderCacheSignature(const vk::PhysicalDeviceProperties& properties) {
+	return DeviceCacheSignature("KytySC2", properties);
 }
 
 std::string PipelineCacheTitleId() {
@@ -289,16 +300,80 @@ struct PipelineCache::ProgramCache {
 
 	static constexpr std::size_t MaxStaticKeyWords = 32 + ShaderVertexInputInfo::RES_MAX * 6;
 
+	uint64_t ModuleCacheKey(const ShaderRecompiler::CompileOptions& options,
+	                        const ShaderRecompiler::IR::ResourceSpecialization& specialization,
+	                        uint32_t push_data_start_dword,
+	                        std::span<const uint32_t> function_code) const {
+		std::vector<uint64_t> values;
+		values.reserve(16 + lookup_key.static_state.size() + function_code.size());
+		const auto add = [&values](uint64_t value) { values.push_back(value); };
+		add(static_cast<uint32_t>(lookup_key.stage));
+		add(lookup_key.hash);
+		add(lookup_key.user_data_count);
+		add(lookup_key.code_size);
+		add(options.wave_size);
+		add(options.user_data_base);
+		add(push_data_start_dword);
+		add(lookup_key.static_state.size());
+		for (const auto value: lookup_key.static_state) add(value);
+		add(function_code.size());
+		for (const auto value: function_code) add(value);
+		add(specialization.buffers.size());
+		for (const auto& buffer: specialization.buffers) {
+			add(buffer.packed_stride);
+			add(static_cast<uint32_t>(buffer.descriptor_format));
+			add(buffer.descriptor_swizzle);
+			add(buffer.zero_stride_oob);
+			add(buffer.indirect_root);
+			add(buffer.indirect_mapping_offset);
+			add(buffer.indirect_search_iterations);
+		}
+		add(specialization.images.size());
+		for (const auto& image: specialization.images) {
+			add(static_cast<uint32_t>(image.numeric_class));
+			add(static_cast<uint32_t>(image.dimension));
+			add(image.mip_count);
+			add(static_cast<uint32_t>(image.conversion_format));
+			add(image.shader_swizzle);
+			add(image.indirect_root);
+			add(image.indirect_mapping_offset);
+			add(image.indirect_search_iterations);
+			add(image.cube);
+			add(image.fmask);
+		}
+		return XXH3_64bits(values.data(), values.size() * sizeof(values[0]));
+	}
+
 	Permutation CompilePermutation(const char*                                  stage_name,
 	                               const ShaderRecompiler::CompileOptions&      options,
 	                               ShaderRecompiler::TranslateResult            translated,
 	                               ShaderRecompiler::IR::ResourceSpecialization specialization,
 	                               uint32_t push_data_start_dword,
 	                               std::span<const uint32_t> function_code) {
+		const auto cache_key = ModuleCacheKey(options, specialization, push_data_start_dword,
+		                                      function_code);
+		std::optional<std::vector<uint32_t>> cached_spirv;
+		if (shader_cache.has_value()) {
+			cached_spirv = shader_cache->Find(cache_key);
+			if (cached_spirv.has_value() &&
+			    (cached_spirv->size() < 5 || cached_spirv->front() != 0x07230203u)) {
+				shader_cache->Erase(cache_key);
+				cached_spirv.reset();
+			}
+			Performance::Add(cached_spirv.has_value() ? Performance::Counter::ShaderCacheHits
+			                                           : Performance::Counter::ShaderCacheMisses);
+		}
 		Performance::ScopedDuration compile_time(Performance::Duration::SpirvCompilation);
 		Performance::Add(Performance::Counter::SpirvCompilations);
+		const auto cached_code = cached_spirv.has_value()
+		                             ? std::span<const uint32_t>(*cached_spirv)
+		                             : std::span<const uint32_t> {};
 		auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
-		                                               specialization, push_data_start_dword);
+		                                               specialization, push_data_start_dword,
+		                                               cached_code);
+		if (!cached_spirv.has_value() && shader_cache.has_value()) {
+			shader_cache->Insert(cache_key, result.spirv);
+		}
 		if (!ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv)) {
 			DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 			EXIT("%s failed hash=0x%016" PRIx64 ": SPIR-V validation failed\n", options.dump_label,
@@ -467,8 +542,20 @@ struct PipelineCache::ProgramCache {
 		return permutation.handle;
 	}
 
-	explicit ProgramCache(vk::Device device): device(device) {
+	explicit ProgramCache(GraphicContext& graphics): device(graphics.device) {
 		lookup_key.static_state.reserve(MaxStaticKeyWords);
+		const auto title_id = PipelineCacheTitleId();
+		const std::string_view git_hash = KYTY_GIT_HASH;
+		if (!title_id.empty() && KYTY_BUILD == KYTY_BUILD_RELEASE && git_hash != "unknown" &&
+		    !git_hash.ends_with("-dirty")) {
+			shader_cache.emplace(std::filesystem::path("_ShaderCache") / (title_id + ".bin"),
+			                    ShaderCacheSignature(graphics.GetPhysicalDeviceProperties()));
+		}
+	}
+	void Save() {
+		if (shader_cache.has_value() && shader_cache->Dirty() && !shader_cache->Save()) {
+			PipelineCacheLog("Shader cache: failed to save");
+		}
 	}
 	~ProgramCache() {
 		for (const auto& [key, entry]: programs) {
@@ -482,11 +569,12 @@ struct PipelineCache::ProgramCache {
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	ProgramKey                                                  lookup_key;
 	vk::Device                                                  device;
+	std::optional<PersistentShaderCache>                       shader_cache;
 	uint64_t                                                    next_shader_id = 0;
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
-    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)) {
+    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics)) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	InitializeDriverCache();
 }
@@ -595,6 +683,7 @@ void PipelineCache::InitializeDriverCache() {
 }
 
 void PipelineCache::Save() {
+	m_program_cache->Save();
 	if (m_driver_cache == nullptr) {
 		return;
 	}

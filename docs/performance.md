@@ -33,6 +33,12 @@ Frame limits require `--profile` or `--performance-report`. Values must be unsig
 
 Run baseline and candidate builds at least three times. Compare medians first, then p95/p99, wait counts, compilation misses, transfer volume, and sample-loss fields. Do not compare GPU durations across different GPUs or timestamp periods without accounting for hardware differences.
 
+## Shader and pipeline caches
+
+Release builds with known clean Git identity persist emulator-side SPIR-V modules under `_ShaderCache/<title-id>.bin`. Cache entries are scoped to compiler revision, Vulkan device identity, shader permutation state, and resource specialization. Missing, stale, corrupt, or failed cache data falls back to normal compilation. Writes use temporary-file replacement.
+
+Vulkan driver pipeline binaries remain separate under `_PipelineCache/<title-id>.bin`. Clear both directories for cold-start measurements. `compile.shader_cache_hits` and `compile.shader_cache_misses` show emulator-side cache behavior in telemetry reports.
+
 ## Frame semantics
 
 Successful guest presentation defines gameplay frame and advances warm-up/capture windows. Other presentation outcomes remain separate:

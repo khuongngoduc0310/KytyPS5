@@ -67,6 +67,8 @@ constexpr std::array<MetricDescription, kCounterCount> kCounterDescriptions{{
     {"barriers.global", "count"},
     {"barriers.presentation", "count"},
     {"compile.shader_translations", "count"},
+    {"compile.shader_cache_hits", "count"},
+    {"compile.shader_cache_misses", "count"},
     {"compile.spirv_modules", "count"},
     {"program.permutation_hits", "count"},
     {"program.permutation_misses", "count"},
