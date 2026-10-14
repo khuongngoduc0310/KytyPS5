@@ -398,6 +398,9 @@ void CommandScheduler::CheckActive() const {
 }
 
 CommandBuffer& CommandScheduler::Current() {
+	if (m_graphics.vulkan_fault.IsDeviceLost()) {
+		EXIT("Vulkan device lost before command-buffer access\n");
+	}
 	CheckActive();
 	return m_command;
 }
