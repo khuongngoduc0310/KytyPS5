@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "common/singleton.h"
 #include "common/stringUtils.h"
@@ -147,6 +148,7 @@ static void Init(const Config::ConfigOptions& cfg, const std::filesystem::path& 
 	subsystems.Initialize<Loader::Timer::Lifecycle>();
 	subsystems.Initialize<Libs::LibKernel::PthreadLifecycle>();
 	subsystems.Initialize<Profiler::Lifecycle>();
+	subsystems.Initialize<Performance::Lifecycle>();
 	subsystems.Initialize<Libs::Network::Lifecycle>();
 	subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
 	subsystems.Initialize<Libs::LibKernel::FileSystem::Lifecycle>();
@@ -203,7 +205,12 @@ void Run(const RunOptions& options) {
 	std::string title_id;
 	if (Loader::SystemContentParamSfoGetString("TITLE_ID", &title_id) && !title_id.empty()) {
 		Log::WriteToConsoleAndLog(fmt::format("Title ID: {}\n", title_id));
+	} else {
+		title_id = "UNKNOWN";
 	}
+	Performance::Metadata performance_metadata;
+	performance_metadata.title_id = title_id;
+	Performance::SetMetadata(performance_metadata);
 
 	int ok = atexit(KytyClose);
 	EXIT_NOT_IMPLEMENTED(ok != 0);

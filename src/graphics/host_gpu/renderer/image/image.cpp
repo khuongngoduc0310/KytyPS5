@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -236,6 +237,7 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 	dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
 	dependency.pImageMemoryBarriers    = barriers.data();
 	command_buffer.pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::ImageBarriers, barriers.size());
 }
 
 void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
@@ -263,8 +265,12 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	dependency.pImageMemoryBarriers     = image_barriers.data();
 	auto command                        = m_scheduler.Current().Handle();
 	command.pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::BufferBarriers);
+	Performance::Add(Performance::Counter::ImageBarriers, image_barriers.size());
 	command.copyBufferToImage(buffer, backing.image, vk::ImageLayout::eTransferDstOptimal,
 	                          static_cast<uint32_t>(copies.size()), copies.data());
+	Performance::Add(Performance::Counter::UploadRanges, copies.size());
+	Performance::Add(Performance::Counter::UploadBytes, size);
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
 	buffer_barrier.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
 	buffer_barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
@@ -273,6 +279,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	dependency.imageMemoryBarrierCount = 0;
 	dependency.pImageMemoryBarriers    = nullptr;
 	command.pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::BufferBarriers);
 	Transit(vk::ImageLayout::eGeneral,
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
 }
@@ -303,8 +310,12 @@ void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buf
 	dependency.pImageMemoryBarriers     = image_barriers.data();
 	auto command                        = m_scheduler.Current().Handle();
 	command.pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::BufferBarriers);
+	Performance::Add(Performance::Counter::ImageBarriers, image_barriers.size());
 	command.copyImageToBuffer(backing.image, vk::ImageLayout::eTransferSrcOptimal, buffer,
 	                          static_cast<uint32_t>(copies.size()), copies.data());
+	Performance::Add(Performance::Counter::DownloadRanges, copies.size());
+	Performance::Add(Performance::Counter::DownloadBytes, size);
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eCopy;
 	buffer_barrier.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
 	buffer_barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
@@ -313,6 +324,7 @@ void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buf
 	dependency.imageMemoryBarrierCount = 0;
 	dependency.pImageMemoryBarriers    = nullptr;
 	command.pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::BufferBarriers);
 }
 
 std::pair<uint32_t, uint32_t> Image::SanitizeCopyLayers(const Image& source,
@@ -387,6 +399,9 @@ void Image::CopyImage(Image& source) {
 	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, backing.image,
 	                  vk::ImageLayout::eTransferDstOptimal, static_cast<uint32_t>(copies.size()),
 	                  copies.data());
+	Performance::Add(Performance::Counter::ImageCopies, copies.size());
+	Performance::Add(Performance::Counter::ImageCopyBytes,
+	                 std::min(source.info.data.size, info.data.size));
 	Transit(vk::ImageLayout::eGeneral,
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
 }
@@ -437,6 +452,9 @@ void Image::Resolve(Image& source, const ImageSubresourceRange& source_range,
 		region.extent         = resolve_extent;
 		command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, backing.image,
 		                  vk::ImageLayout::eTransferDstOptimal, region);
+		Performance::Add(Performance::Counter::ImageCopies);
+		Performance::Add(Performance::Counter::ImageCopyBytes,
+		                 std::min(source.info.data.size, info.data.size));
 	} else {
 		vk::ImageResolve region {};
 		region.srcSubresource = {vk::ImageAspectFlagBits::eColor, resolved_source_range.base_level,
@@ -535,6 +553,7 @@ void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tile
 				barrier.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
 				barrier.dstAccessMask = vk::AccessFlagBits2::eTransferWrite;
 				command.pipelineBarrier2(dependency);
+				Performance::Add(Performance::Counter::BufferBarriers);
 				command.copyImageToBuffer(source.backing.image,
 				                          vk::ImageLayout::eTransferSrcOptimal, buffer.Handle(),
 				                          source_copy);
@@ -550,9 +569,12 @@ void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tile
 					barrier.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
 					barrier.dstAccessMask = vk::AccessFlagBits2::eTransferRead;
 					command.pipelineBarrier2(dependency);
+					Performance::Add(Performance::Counter::BufferBarriers);
 				}
 				command.copyBufferToImage(buffer.Handle(), backing.image,
 				                          vk::ImageLayout::eTransferDstOptimal, destination_copy);
+				Performance::Add(Performance::Counter::ImageCopies, 2);
+				Performance::Add(Performance::Counter::ImageCopyBytes, copy_size * 2);
 			}
 		}
 	}
@@ -589,6 +611,7 @@ void Image::CopyMip(Image& source, uint32_t mip, uint32_t layer) {
 	               command);
 	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, backing.image,
 	                  vk::ImageLayout::eTransferDstOptimal, copy_count, copies.data());
+	Performance::Add(Performance::Counter::ImageCopies, copy_count);
 	Transit(vk::ImageLayout::eGeneral,
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
 }

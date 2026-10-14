@@ -4,6 +4,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -294,6 +295,8 @@ struct PipelineCache::ProgramCache {
 	                               ShaderRecompiler::IR::ResourceSpecialization specialization,
 	                               uint32_t push_data_start_dword,
 	                               std::span<const uint32_t> function_code) {
+		Performance::ScopedDuration compile_time(Performance::Duration::SpirvCompilation);
+		Performance::Add(Performance::Counter::SpirvCompilations);
 		auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
 		                                               specialization, push_data_start_dword);
 		if (!ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv)) {
@@ -356,12 +359,14 @@ struct PipelineCache::ProgramCache {
 				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
 			}
 			if (permutation != nullptr) {
+				Performance::Add(Performance::Counter::ProgramPermutationHits);
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				return permutation->handle;
 			}
 		}
 
+		Performance::Add(Performance::Counter::ProgramPermutationMisses);
 		ShaderStageInputInfo stage_input {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			stage_input.vertex = &input_info;
@@ -407,16 +412,20 @@ struct PipelineCache::ProgramCache {
 		if (entry == programs.end()) source = ShaderRecompiler::PrepareShaderSource(params.code, options);
 		auto* current = entry == programs.end() ? &source : entry->second.call_source.get();
 		ShaderRecompiler::TranslateResult translated;
-		if (current != nullptr) {
-			if (current->call) {
-				if (entry == programs.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
-				translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
-				translated.program.source_reads = current->reads;
+		{
+			Performance::ScopedDuration translation_time(Performance::Duration::ShaderTranslation);
+			Performance::Add(Performance::Counter::ShaderTranslations);
+			if (current != nullptr) {
+				if (current->call) {
+					if (entry == programs.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
+					translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
+					translated.program.source_reads = current->reads;
+				} else {
+					translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
+				}
 			} else {
-				translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
+				translated = ShaderRecompiler::TranslateProgram(params.code, options);
 			}
-		} else {
-			translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		}
 		if (entry == programs.end()) {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
@@ -428,6 +437,7 @@ struct PipelineCache::ProgramCache {
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 			if (const auto* permutation = entry->second.FindPermutation<true>(runtime, push_data_cursor)) {
+				Performance::Add(Performance::Counter::ProgramPermutationHits);
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				return permutation->handle;
@@ -436,6 +446,7 @@ struct PipelineCache::ProgramCache {
 		entry->second.permutations.push_back(CompilePermutation(
 		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
 		    entry->second.FunctionCode()));
+		Performance::Add(Performance::Counter::ProgramPermutationCreations);
 		const auto& permutation = entry->second.permutations.back();
 		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
@@ -928,8 +939,10 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	}
 
 	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
+		Performance::Add(Performance::Counter::GraphicsPipelineHits);
 		return *iter->second;
 	}
+	Performance::Add(Performance::Counter::GraphicsPipelineMisses);
 
 	if (graphics_debug_dump_enabled()) {
 		ShaderDbgDumpInputInfo(vs_input_info);
@@ -943,8 +956,12 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 
 	auto cached = std::make_unique<Pipeline>();
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
-	CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
-	                       ps_input_info, programs, static_params, m_driver_cache);
+	{
+		Performance::ScopedDuration creation(Performance::Duration::GraphicsPipelineCreation);
+		CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
+		                       ps_input_info, programs, static_params, m_driver_cache);
+	}
+	Performance::Add(Performance::Counter::GraphicsPipelineCreations);
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
@@ -965,15 +982,22 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 
 	if (auto iter = m_compute_pipelines.find(compute_program.id);
 	    iter != m_compute_pipelines.end()) {
+		Performance::Add(Performance::Counter::ComputePipelineHits);
 		return *iter->second;
 	}
+	Performance::Add(Performance::Counter::ComputePipelineMisses);
 
 	if (graphics_debug_dump_enabled()) {
 		ShaderDbgDumpInputInfo(input_info);
 	}
 
 	auto cached = std::make_unique<Pipeline>();
-	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
+	{
+		Performance::ScopedDuration creation(Performance::Duration::ComputePipelineCreation);
+		CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module,
+		                       m_driver_cache);
+	}
+	Performance::Add(Performance::Counter::ComputePipelineCreations);
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);

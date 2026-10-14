@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -122,6 +123,7 @@ void GuestGpu::ProcessCommands() {
 
 void GuestGpu::SendCommandSync(Common::UniqueFunction<void>&& command) {
 	EXIT_IF(!command);
+	Performance::Add(Performance::Counter::SynchronousCommandLaneCalls);
 	if (IsGpuThread()) {
 		command();
 		return;
@@ -428,6 +430,9 @@ void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(!m_accepting);
 	m_queues[submission.queue_id].push_back(std::move(submission));
 	m_submission_count++;
+	Performance::Add(Performance::Counter::GuestGpuQueuedSubmissions);
+	Performance::SetGauge(Performance::Gauge::GuestGpuQueueDepth, m_submission_count);
+	Performance::MaxGauge(Performance::Gauge::GuestGpuQueueDepthHighWater, m_submission_count);
 	m_work_available.Signal();
 }
 
@@ -481,6 +486,9 @@ void GuestGpu::ThreadRun(void* data) {
 					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
+							if (queue.front().blocked) {
+								Performance::Add(Performance::Counter::GuestGpuResumedSlices);
+							}
 							queue.front().blocked = false;
 						}
 					}
@@ -490,6 +498,8 @@ void GuestGpu::ThreadRun(void* data) {
 				submission  = std::move(queue.front());
 				queue.pop_front();
 				gpu->m_submission_count--;
+				Performance::SetGauge(Performance::Gauge::GuestGpuQueueDepth,
+				                      gpu->m_submission_count);
 				gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
 				gpu->m_processing = true;
 				has_submission    = true;
@@ -515,14 +525,24 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		EXIT_IF(!has_submission);
-		const bool complete = gpu->Process(submission);
+		bool complete = false;
+		{
+			Performance::ScopedDuration processing(Performance::Duration::GuestGpuPm4Processing);
+			complete = gpu->Process(submission);
+		}
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
+			Performance::Add(Performance::Counter::GuestGpuBlockedSlices);
 			submission.blocked = true;
 			gpu->m_queues[submission.queue_id].push_front(std::move(submission));
 			gpu->m_submission_count++;
+			Performance::SetGauge(Performance::Gauge::GuestGpuQueueDepth,
+			                      gpu->m_submission_count);
+			Performance::MaxGauge(Performance::Gauge::GuestGpuQueueDepthHighWater,
+			                      gpu->m_submission_count);
 		} else {
+			Performance::Add(Performance::Counter::GuestGpuCompletedSubmissions);
 			for (auto& queue: gpu->m_queues) {
 				if (!queue.empty()) {
 					queue.front().blocked = false;
@@ -1267,6 +1287,7 @@ void CommandProcessor::EmitGlobalBarrier() {
 	dependency.pMemoryBarriers    = &barrier;
 	GetScheduler().EndRendering();
 	CurrentBuffer().Handle().pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::GlobalBarriers);
 }
 
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {

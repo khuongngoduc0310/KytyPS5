@@ -82,6 +82,9 @@ static void PrintUsage() {
 	::printf("  --printf-direction <value>           Silent, Console, or File.\n");
 	::printf("  --printf-output-file <path>          Guest printf output file.\n");
 	::printf("  --profile                            Enable the Tracy profiler.\n");
+	::printf("  --performance-report <path>          Write a versioned gameplay telemetry JSON report.\n");
+	::printf("  --performance-warmup-frames <num>    Guest frames excluded before capture. Default: 0.\n");
+	::printf("  --performance-capture-frames <num>   Guest frames to capture; 0 means until shutdown.\n");
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
 	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
@@ -195,6 +198,8 @@ static bool ParseUserId(const std::string& value, int32_t& out) {
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
 	show_help = false;
+	bool performance_warmup_specified = false;
+	bool performance_capture_specified = false;
 
 	for (int i = 1; i < argc; i++) {
 		std::string arg = std::string(argv[i]);
@@ -424,6 +429,24 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--printf-output-file") {
 			options.config.printf_output_file = Common::PathFromUtf8(value);
+		} else if (arg == "--performance-report") {
+			if (value.empty()) {
+				::printf("performance report path must not be empty\n");
+				return false;
+			}
+			options.config.performance_report_path = Common::PathFromUtf8(value);
+		} else if (arg == "--performance-warmup-frames") {
+			if (!ParseUint32(value, options.config.performance_warmup_frames)) {
+				::printf("invalid performance warmup frame count: %s\n", value.c_str());
+				return false;
+			}
+			performance_warmup_specified = true;
+		} else if (arg == "--performance-capture-frames") {
+			if (!ParseUint32(value, options.config.performance_capture_frames)) {
+				::printf("invalid performance capture frame count: %s\n", value.c_str());
+				return false;
+			}
+			performance_capture_specified = true;
 		} else if (arg == "--spirv-debug-printf") {
 			if (!ParseBool(value, options.config.spirv_debug_printf_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
@@ -464,6 +487,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 
 	if (options.config.gpu_assisted_validation_enabled) {
 		options.config.vulkan_validation_enabled = true;
+	}
+	const bool performance_enabled = options.config.profiler_enabled ||
+	                                 !options.config.performance_report_path.empty();
+	if (!performance_enabled &&
+	    (performance_warmup_specified || performance_capture_specified)) {
+		::printf("performance frame limits require --profile or --performance-report\n");
+		return false;
 	}
 
 	return show_help || (!options.app0_dir.empty() && !options.elf.empty());

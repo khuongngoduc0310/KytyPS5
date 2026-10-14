@@ -190,7 +190,7 @@ private:
 	                                          const DrawCallInfo& draw,
 	                                          uint32_t            render_target_slice_offset,
 	                                          DrawRenderState& state);
-	void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
+	bool ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
 	                         DrawRenderState& state, vk::PrimitiveTopology topology,
 	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
 	                         bool primitive_restart_enable);

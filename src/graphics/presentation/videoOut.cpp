@@ -864,12 +864,15 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		}
 		const auto frame_begin = Common::Timer::QueryPerformanceCounter();
 		total_wait -= static_cast<int64_t>(frame_begin - sleep_begin);
+		if (total_wait < 0) {
+			Performance::Add(Performance::Counter::LateVblankOpportunities);
+		}
 
 		const auto refresh = std::max(Config::GetVblankFrequency(), 1u);
 		const auto period  = std::max(frequency / refresh, uint64_t {1});
 
 		if (m_presenter.IsGuestPaused()) {
-			(void)m_presenter.PresentLastFrame();
+			(void)m_presenter.PresentLastFrame(Performance::PresentationClass::Paused);
 			const auto frame_end = Common::Timer::QueryPerformanceCounter();
 			total_wait +=
 			    static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
@@ -879,7 +882,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		VblankBegin();
 		bool presented = m_flip_queue.Flip(0);
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
-			if (m_presenter.PresentLastFrame()) {
+			if (m_presenter.PresentLastFrame(Performance::PresentationClass::OverlayOnly)) {
 				presented = true;
 			} else {
 				uint32_t width  = 0;
@@ -890,7 +893,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 					height = m_video_out_ctx[0].height;
 				}
 				auto& blank = m_presenter.PrepareBlankFrame(width, height, true);
-				m_presenter.Present(blank);
+				(void)m_presenter.Present(blank, Performance::PresentationClass::OverlayOnly);
 				presented = true;
 			}
 		}
@@ -908,7 +911,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			}
 			if (!any_open) {
 				auto& blank = m_presenter.PrepareBlankFrame(width, height, true);
-				m_presenter.Present(blank);
+				(void)m_presenter.Present(blank, Performance::PresentationClass::Blank);
 			}
 		}
 		VblankEnd();
@@ -1242,7 +1245,15 @@ bool FlipQueue::Flip(uint32_t micros) {
 		layers[i] = {r.frame, r.cfg->bus, r.premultiplied_alpha};
 	}
 	if (due) {
-		m_presenter.Present(std::span(layers.data(), count));
+		const auto main_request = std::find_if(
+		    requests.begin(), requests.begin() + count,
+		    [](const Request& request) { return request.cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN; });
+		const auto classification =
+		    main_request == requests.begin() + count
+		        ? Performance::PresentationClass::OverlayOnly
+		        : (IsSpecialBufferIndex(main_request->index) ? Performance::PresentationClass::Blank
+		                                                     : Performance::PresentationClass::Guest);
+		(void)m_presenter.Present(std::span(layers.data(), count), classification);
 	}
 
 	m_mutex.Lock();

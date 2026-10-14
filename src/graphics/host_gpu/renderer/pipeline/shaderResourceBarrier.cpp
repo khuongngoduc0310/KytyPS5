@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 
 #include "common/assert.h"
+#include "common/performanceTelemetry.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderBindings.h"
 
@@ -113,6 +114,7 @@ void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags sou
 	const auto barrier = MakeShaderAccessDependency();
 	vk_buffer.pipelineBarrier(source_stages, vk::PipelineStageFlagBits::eAllCommands,
 	                          vk::DependencyFlags {}, 1, &barrier, 0, nullptr, 0, nullptr);
+	Performance::Add(Performance::Counter::ShaderBarriers);
 }
 
 void ShaderWriteHazardBarrier(vk::CommandBuffer      vk_buffer,
@@ -121,6 +123,7 @@ void ShaderWriteHazardBarrier(vk::CommandBuffer      vk_buffer,
 	const auto barrier = MakeShaderWriteHazardDependency();
 	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, destination_stages,
 	                          vk::DependencyFlags {}, 1, &barrier, 0, nullptr, 0, nullptr);
+	Performance::Add(Performance::Counter::ShaderBarriers);
 }
 
 void ShaderWriteBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages) {
@@ -131,6 +134,7 @@ void ShaderWriteBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags sour
 	                              vk::PipelineStageFlagBits::eAllGraphics |
 	                              vk::PipelineStageFlagBits::eTransfer,
 	                          vk::DependencyFlags {}, 1, &barrier, 0, nullptr, 0, nullptr);
+	Performance::Add(Performance::Counter::ShaderBarriers);
 }
 
 } // namespace Libs::Graphics

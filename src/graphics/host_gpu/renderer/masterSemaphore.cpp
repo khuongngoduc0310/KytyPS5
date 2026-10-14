@@ -3,6 +3,9 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
 
+#include <algorithm>
+#include <chrono>
+
 namespace Libs::Graphics {
 
 MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics) {
@@ -35,15 +38,20 @@ void MasterSemaphore::Refresh() {
 	}
 }
 
-void MasterSemaphore::Wait(uint64_t tick) {
+void MasterSemaphore::Wait(uint64_t tick, Performance::WaitReason reason) {
 	if (IsFree(tick)) {
+		Performance::RecordWait(reason, 0);
 		return;
 	}
 	Refresh();
 	if (IsFree(tick)) {
+		Performance::RecordWait(reason, 0);
 		return;
 	}
 
+	const bool telemetry_enabled = Performance::Enabled();
+	const auto begin = telemetry_enabled ? std::chrono::steady_clock::now()
+	                                     : std::chrono::steady_clock::time_point {};
 	vk::SemaphoreWaitInfo wait_info {};
 	wait_info.semaphoreCount = 1;
 	wait_info.pSemaphores    = &m_semaphore;
@@ -52,6 +60,13 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
+	uint64_t elapsed_ns = 0;
+	if (telemetry_enabled) {
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		    std::chrono::steady_clock::now() - begin);
+		elapsed_ns = static_cast<uint64_t>(std::max<int64_t>(0, elapsed.count()));
+	}
+	Performance::RecordWait(reason, elapsed_ns);
 }
 
 } // namespace Libs::Graphics

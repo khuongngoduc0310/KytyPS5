@@ -136,6 +136,18 @@ bool ProfilerEnabled() {
 	return g_config->profiler_enabled;
 }
 
+std::filesystem::path GetPerformanceReportPath() {
+	return g_config->performance_report_path;
+}
+
+uint32_t GetPerformanceWarmupFrames() {
+	return g_config->performance_warmup_frames;
+}
+
+uint32_t GetPerformanceCaptureFrames() {
+	return g_config->performance_capture_frames;
+}
+
 bool SpirvDebugPrintfEnabled() {
 	return g_config->spirv_debug_printf_enabled;
 }

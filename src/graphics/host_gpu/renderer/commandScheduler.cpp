@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <optional>
 
@@ -93,9 +94,10 @@ bool CommandScheduler::InDeferredOperation() noexcept {
 	return g_deferred_callback_scheduler != nullptr;
 }
 
-CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics)
-    : m_master(graphics), m_context(context), m_graphics(graphics),
-      m_command_pool(graphics, m_master), m_command(*this),
+CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics,
+                                   Performance::SchedulerDomain domain)
+    : m_master(graphics), m_context(context), m_graphics(graphics), m_domain(domain),
+      m_command_pool(graphics, m_master), m_command(*this), m_timestamps(graphics, m_master, domain),
       m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {}
 
 CommandScheduler::~CommandScheduler() {
@@ -125,7 +127,8 @@ void CommandScheduler::Shutdown() {
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
-	m_master.Wait(CurrentTick() - 1);
+	m_master.Wait(CurrentTick() - 1, Performance::WaitReason::Shutdown);
+	m_timestamps.Drain();
 	PopPendingOperations();
 	DrainPriorityOperations();
 	m_priority_thread.request_stop();
@@ -177,7 +180,7 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 
 void CommandScheduler::FlushAndWait() {
 	const auto tick = Submit();
-	m_master.Wait(tick);
+	m_master.Wait(tick, Performance::WaitReason::Generic);
 	BeginNext();
 }
 
@@ -186,12 +189,12 @@ void CommandScheduler::Finish() {
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
-	m_master.Wait(CurrentTick() - 1);
+	m_master.Wait(CurrentTick() - 1, Performance::WaitReason::Finish);
 	BeginNext();
 	PopPendingOperations();
 }
 
-void CommandScheduler::Wait(uint64_t tick) {
+void CommandScheduler::Wait(uint64_t tick, Performance::WaitReason reason) {
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
 		CheckActive();
@@ -200,15 +203,16 @@ void CommandScheduler::Wait(uint64_t tick) {
 		// resources are released only at the next GPU operation boundary.
 		const auto submitted_tick = Submit();
 		EXIT_IF(submitted_tick != tick);
-		m_master.Wait(tick);
+		m_master.Wait(tick, reason);
 		BeginNext();
 	} else {
-		m_master.Wait(tick);
+		m_master.Wait(tick, reason);
 	}
 }
 
 void CommandScheduler::PopPendingOperations() {
 	m_master.Refresh();
+	m_timestamps.Collect();
 	for (;;) {
 		PendingOperation operation;
 		{
@@ -275,7 +279,7 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_active      = true;
 			m_priority_active_tick = operation.tick;
 		}
-		m_master.Wait(operation.tick);
+		m_master.Wait(operation.tick, Performance::WaitReason::PriorityCompletion);
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));
 		}
@@ -291,19 +295,44 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 void CommandScheduler::DrainPriorityOperations() {
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
-	m_operation_available.wait(
-	    lock, [this] { return m_priority_operations.empty() && !m_priority_active; });
+	const auto ready = [this] { return m_priority_operations.empty() && !m_priority_active; };
+	const bool blocked = !ready();
+	const bool telemetry_enabled = blocked && Performance::Enabled();
+	const auto begin = telemetry_enabled ? std::chrono::steady_clock::now()
+	                                     : std::chrono::steady_clock::time_point {};
+	m_operation_available.wait(lock, ready);
+	lock.unlock();
+	uint64_t elapsed_ns = 0;
+	if (telemetry_enabled) {
+		elapsed_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                           std::chrono::steady_clock::now() - begin)
+		                                           .count());
+	}
+	Performance::RecordWait(Performance::WaitReason::PriorityCompletion, elapsed_ns);
 }
 
 void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
-	m_operation_available.wait(lock, [this, tick] {
+	const auto ready = [this, tick] {
 		const bool active_before_or_at = m_priority_active && m_priority_active_tick <= tick;
 		const bool queued_before_or_at =
 		    !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
 		return !active_before_or_at && !queued_before_or_at;
-	});
+	};
+	const bool blocked = !ready();
+	const bool telemetry_enabled = blocked && Performance::Enabled();
+	const auto begin = telemetry_enabled ? std::chrono::steady_clock::now()
+	                                     : std::chrono::steady_clock::time_point {};
+	m_operation_available.wait(lock, ready);
+	lock.unlock();
+	uint64_t elapsed_ns = 0;
+	if (telemetry_enabled) {
+		elapsed_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                           std::chrono::steady_clock::now() - begin)
+		                                           .count());
+	}
+	Performance::RecordWait(Performance::WaitReason::PriorityCompletion, elapsed_ns);
 }
 
 void CommandScheduler::RunOperation(Common::UniqueFunction<void>&& operation) {
@@ -334,6 +363,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
+	m_timestamp_token = m_timestamps.Begin(m_command.m_buffer);
 	m_dynamic_state.Invalidate();
 	return m_command;
 }
@@ -343,8 +373,9 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
+	const auto buffer = m_command.m_buffer;
+	m_timestamps.End(buffer, m_timestamp_token);
 	m_command.End();
-	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
 	EXIT_IF(graphics.queue == nullptr);
 
@@ -382,6 +413,11 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
+	Performance::Add(m_domain == Performance::SchedulerDomain::Guest
+	                     ? Performance::Counter::GuestQueueSubmissions
+	                     : Performance::Counter::PresentationQueueSubmissions);
+	m_timestamps.Submitted(m_timestamp_token, tick);
+	m_timestamp_token.reset();
 	m_command.m_buffer = nullptr;
 	return tick;
 }

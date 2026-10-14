@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -180,6 +181,7 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
 	const auto native = command.Handle();
 	native.pipelineBarrier(before_stage, vk::PipelineStageFlagBits::eTransfer,
 	                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 2, before, 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers, 2);
 	const vk::BufferCopy copy {source_offset, destination_offset, size};
 	native.copyBuffer(source.Handle(), Handle(), 1, &copy);
 	const vk::BufferMemoryBarrier after[] = {
@@ -192,6 +194,15 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
 	}
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, after_stage,
 	                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 2, after, 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers, 2);
+	if (source.Usage() == MemoryUsage::Upload || source.Usage() == MemoryUsage::Stream) {
+		Performance::Add(Performance::Counter::UploadRanges);
+		Performance::Add(Performance::Counter::UploadBytes, size);
+	}
+	if (Usage() == MemoryUsage::Download) {
+		Performance::Add(Performance::Counter::DownloadRanges);
+		Performance::Add(Performance::Counter::DownloadBytes, size);
+	}
 }
 
 void Buffer::Fill(uint64_t offset, uint64_t size, uint32_t value) {
@@ -213,6 +224,7 @@ void Buffer::Fill(uint64_t offset, uint64_t size, uint32_t value) {
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                       vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers, 2);
 }
 
 StreamBuffer::StreamBuffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsage usage,
@@ -279,6 +291,13 @@ std::pair<uint8_t*, uint64_t> StreamBuffer::Map(uint64_t size, uint64_t alignmen
 	m_wait_bound  = wait_bound;
 	m_offset      = aligned_offset;
 	m_mapped_size = mapped_size;
+	Performance::Add(Performance::Counter::StreamReservations);
+	if (wrap) {
+		Performance::Add(Performance::Counter::StreamWraps);
+	}
+	const auto occupancy = aligned_offset + mapped_size;
+	Performance::SetGauge(Performance::Gauge::StreamOccupancyBytes, occupancy);
+	Performance::MaxGauge(Performance::Gauge::StreamOccupancyHighWaterBytes, occupancy);
 	return {Mapped().data() + m_offset, m_offset};
 }
 
@@ -319,10 +338,12 @@ bool StreamBuffer::WaitPendingOperations(const std::vector<Watch>& watches,
 	}
 	while (requested_upper_bound > wait_bound && wait_cursor < *invalidation_mark) {
 		const auto& watch = watches[wait_cursor];
-		if (!Scheduler().IsFree(watch.tick) && !allow_wait) {
+		const bool free = Scheduler().IsFree(watch.tick);
+		if (!free && !allow_wait) {
+			Performance::Add(Performance::Counter::StreamRejectedReservations);
 			return false;
 		}
-		Scheduler().Wait(watch.tick);
+		Scheduler().Wait(watch.tick, Performance::WaitReason::StreamBufferReuse);
 		if (Usage() == MemoryUsage::Download) {
 			Scheduler().WaitPriorityOperations(watch.tick);
 		}

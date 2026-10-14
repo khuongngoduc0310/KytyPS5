@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -47,6 +48,22 @@
 #include <vector>
 
 namespace Libs::Graphics {
+namespace {
+
+class DrawTelemetry final {
+public:
+	~DrawTelemetry() {
+		if (!m_emitted) {
+			Performance::Add(Performance::Counter::SkippedDraws);
+		}
+	}
+	void Emitted() noexcept { m_emitted = true; }
+
+private:
+	bool m_emitted = false;
+};
+
+} // namespace
 
 std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 	                                           const ShaderVertexInputInfo& vs_input_info) {
@@ -1012,6 +1029,7 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 				vk_buffer.draw(draw.index_count, draw.instance_count, emit.first_vertex,
 				               emit.first_instance);
 			}
+			Performance::Add(Performance::Counter::NativeDraws);
 			break;
 		case Prospero::PrimitiveType::kQuadListLegacy:
 			EXIT_NOT_IMPLEMENTED((draw.index_count & 0x3u) != 0);
@@ -1023,13 +1041,14 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 					vk_buffer.draw(4, draw.instance_count, i + emit.first_vertex,
 					               emit.first_instance);
 				}
+				Performance::Add(Performance::Counter::NativeDraws);
 			}
 			break;
 		default: EXIT("unknown primitive type: %u\n", static_cast<uint32_t>(ucfg.GetPrimType()));
 	}
 }
 
-void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
+bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
@@ -1054,7 +1073,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
 		if (primitives == 0 || draw.instance_count == 0) {
-			return;
+			return false;
 		}
 		mesh_groups        = (primitives - 1u) / mesh.primitives_per_group + 1u;
 		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
@@ -1153,6 +1172,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+		Performance::Add(Performance::Counter::NativeDraws);
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
@@ -1177,11 +1197,13 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
+	return true;
 }
 
 void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
 	KYTY_PROFILER_FUNCTION();
+	DrawTelemetry draw_telemetry;
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
@@ -1287,14 +1309,17 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	emit.vertex_offset  = native_indirect ? 0 : vertex_offset + args.base_vertex;
 	emit.first_instance = native_indirect ? 0 : instance_offset;
 
-	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
-	                    primitive_restart);
+	if (ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
+	                        primitive_restart)) {
+		draw_telemetry.Emitted();
+	}
 	ResetBindings();
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args) {
 	KYTY_PROFILER_FUNCTION();
+	DrawTelemetry draw_telemetry;
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
@@ -1379,7 +1404,9 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	emit.first_instance = native_indirect ? 0 : instance_offset;
 
 	DrawIndexBufferSource index_source {};
-	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false);
+	if (ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false)) {
+		draw_telemetry.Emitted();
+	}
 	ResetBindings();
 }
 

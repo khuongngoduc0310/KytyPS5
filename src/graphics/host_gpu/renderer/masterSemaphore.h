@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_MASTERSEMAPHORE_H_
 
 #include "common/common.h"
+#include "common/performanceTelemetry.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
@@ -29,7 +30,7 @@ public:
 	[[nodiscard]] vk::Semaphore Handle() const noexcept { return m_semaphore; }
 
 	void Refresh();
-	void Wait(uint64_t tick);
+	void Wait(uint64_t tick, Performance::WaitReason reason = Performance::WaitReason::Generic);
 
 private:
 	GraphicContext&       m_graphics;

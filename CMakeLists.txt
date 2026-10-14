@@ -433,6 +433,12 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
+add_executable(performance_telemetry_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PerformanceTelemetryTests.cpp"
+)
+target_link_libraries(performance_telemetry_tests common Vulkan::Headers nlohmann_json::nlohmann_json)
+target_include_directories(performance_telemetry_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
@@ -609,6 +615,17 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_present_mode_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --present-mode Invalid)
 	set_tests_properties(emulator_present_mode_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_performance_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --performance-report capture.json
+	                 --performance-warmup-frames 2 --performance-capture-frames 3)
+	add_test(NAME emulator_performance_limits_require_capture
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --performance-warmup-frames 2)
+	set_tests_properties(emulator_performance_limits_require_capture PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_performance_numeric_overflow
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help
+	                 --performance-capture-frames 4294967296 --profile)
+	set_tests_properties(emulator_performance_numeric_overflow PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME performance_telemetry COMMAND $<TARGET_FILE:performance_telemetry_tests>)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
@@ -649,6 +666,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests> --red-zone-patcher-only)
 	add_test(NAME command_scheduler_timeline
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --scheduler-only)
+	add_test(NAME gpu_timestamp_collector
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-timestamp-only)
 	add_test(NAME stream_buffer_ring
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --stream-buffer-only)
 	add_test(NAME gpu_command_lane
@@ -695,6 +714,7 @@ if(BUILD_TESTING)
 		trophy_system_tests
 		avplayer_file_tests
 		bit_array_tests
+		performance_telemetry_tests
 		lru_cache_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests

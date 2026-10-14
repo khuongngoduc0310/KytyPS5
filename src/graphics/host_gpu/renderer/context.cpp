@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -104,6 +105,7 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
 	Handle().beginRendering(rendering);
+	Performance::Add(Performance::Counter::DynamicRenderingBegins);
 	m_render_state = state;
 	m_rendering    = true;
 }
@@ -113,6 +115,7 @@ void CommandBuffer::EndRendering() const {
 		return;
 	}
 	Handle().endRendering();
+	Performance::Add(Performance::Counter::DynamicRenderingEnds);
 	m_rendering    = false;
 	m_render_state = {};
 }

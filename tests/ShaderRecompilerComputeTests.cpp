@@ -3,6 +3,7 @@
 #include "common/file.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/subsystems.h"
 #include "common/threads.h"
 #include "gpu_test_shaders/gpu_test_ms_depth_spv.h"
@@ -43277,6 +43278,30 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--scheduler-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckSchedulerTimeline();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--gpu-timestamp-only") == 0) {
+    Performance::CaptureOptions options;
+    options.tracy_enabled = true;
+    Performance::StartForTesting(options);
+    {
+      VulkanHarness vulkan;
+      vulkan.CheckSchedulerTimeline();
+    }
+    const auto snapshot = Performance::SnapshotForTesting();
+    const auto unsupported =
+        snapshot.CounterValue(Performance::Counter::GpuTimingUnsupported);
+    const auto submissions =
+        snapshot.CounterValue(Performance::Counter::GpuTimestampSubmissions);
+    const auto completed =
+        snapshot.CounterValue(Performance::Counter::GpuTimestampResults) +
+        snapshot.CounterValue(Performance::Counter::GpuUnavailableResults);
+    Require("GpuTimestamp", "lifecycle", unsupported != 0 || submissions != 0,
+            "timestamp collector reported neither support nor unsupported state");
+    Require("GpuTimestamp", "drain", submissions == 0 || completed >= submissions,
+            "timestamp collector left submitted query slots unresolved");
+    Performance::Shutdown();
+    Performance::ResetForTesting();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--host-image-allocation-only") == 0) {

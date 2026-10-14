@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -43,7 +45,7 @@ public:
 	FramePool(WindowContext& window, CommandScheduler& scheduler)
 	    : m_window(window), m_scheduler(scheduler) {}
 	~FramePool() {
-		m_scheduler.Wait(m_scheduler.CurrentTick() - 1);
+		m_scheduler.Wait(m_scheduler.CurrentTick() - 1, Performance::WaitReason::Shutdown);
 		for (auto& frame: m_frames) {
 			m_window.graphic_ctx.device.destroyImageView(frame->view, nullptr);
 			if (frame->image.image != nullptr) {
@@ -114,7 +116,7 @@ public:
 		frame->busy = true;
 		m_mutex.Unlock();
 
-		m_scheduler.Wait(frame->present_tick);
+		m_scheduler.Wait(frame->present_tick, Performance::WaitReason::FramePoolReuse);
 		return frame;
 	}
 
@@ -224,6 +226,7 @@ void Presenter::Frame::Transit(vk::CommandBuffer command, vk::ImageLayout layout
 	dependency.imageMemoryBarrierCount = 1;
 	dependency.pImageMemoryBarriers    = &barrier;
 	command.pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::PresentationBarriers);
 	image.state = {stage, access, layout};
 	image.subresource_states.clear();
 }
@@ -242,6 +245,10 @@ void Presenter::Frame::CopyFrom(CommandBuffer& command_buffer, Image& source) {
 	EXIT_IF(copy.srcSubresource.layerCount != copy.dstSubresource.layerCount);
 	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, image.image,
 	                  vk::ImageLayout::eTransferDstOptimal, copy);
+	Performance::Add(Performance::Counter::ImageCopies);
+	Performance::Add(Performance::Counter::ImageCopyBytes,
+	                 static_cast<uint64_t>(copy.extent.width) * copy.extent.height *
+	                     copy.srcSubresource.layerCount * 4u);
 }
 
 void Presenter::Frame::Clear(CommandBuffer& command_buffer, const vk::ClearColorValue& color) {
@@ -301,7 +308,8 @@ private:
 struct Presenter::Impl {
 	explicit Impl(WindowContext& owner)
 	    : renderer(*owner.render_context), window(owner), swapchain(owner),
-	      present_scheduler(renderer, owner.graphic_ctx), frames(owner, present_scheduler) {
+	      present_scheduler(renderer, owner.graphic_ctx, Performance::SchedulerDomain::Presentation),
+	      frames(owner, present_scheduler) {
 		EXIT_IF(owner.render_context == nullptr);
 		swapchain.Create();
 		frames.Initialize(swapchain.ImageCount(), swapchain.Format());
@@ -334,7 +342,7 @@ struct Presenter::Impl {
 		cache.UpdateImage(image_id);
 		return image;
 	}
-	void Present();
+	[[nodiscard]] bool Present();
 
 	RenderContext&        renderer;
 	WindowContext&        window;
@@ -749,6 +757,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                           vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {}, 0,
 	                           nullptr, 0, nullptr, 1, &to_transfer);
+	Performance::Add(Performance::Counter::PresentationBarriers);
 
 	if (source != nullptr) {
 		vk::ImageBlit region {};
@@ -769,6 +778,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		vk_command.blitImage(source->image.image, vk::ImageLayout::eTransferSrcOptimal,
 		                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
 		                     &region, vk::Filter::eLinear);
+		Performance::Add(Performance::Counter::ImageCopies);
 	} else {
 		const vk::ClearColorValue black {};
 		vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal,
@@ -797,6 +807,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	                                           : vk::PipelineStageFlagBits::eAllCommands,
 	                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
 	                           &to_present);
+	Performance::Add(Performance::Counter::PresentationBarriers);
 	if (draw_attachment) {
 		if (draw_overlay) {
 			DrawOverlay(vk_command, overlay);
@@ -807,6 +818,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 				                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
 				                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0,
 				                           nullptr, 1, &to_present);
+				Performance::Add(Performance::Counter::PresentationBarriers);
 			}
 		}
 		if (draw_system_overlay) {
@@ -820,6 +832,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		                           vk::PipelineStageFlagBits::eAllCommands,
 		                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
 		                           &to_present);
+		Performance::Add(Performance::Counter::PresentationBarriers);
 	}
 }
 
@@ -909,13 +922,12 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	return *frame;
 }
 
-bool Presenter::PresentLastFrame() {
+bool Presenter::PresentLastFrame(Performance::PresentationClass classification) {
 	Common::LockGuard lock(m_impl->present_mutex);
 	if (m_impl->layers[0].frame == nullptr && m_impl->layers[1].frame == nullptr) {
 		return false;
 	}
-	m_impl->Present();
-	return true;
+	return PresentClassified(classification);
 }
 
 bool Presenter::IsGuestPaused() const noexcept {
@@ -932,12 +944,13 @@ RenderContext& Presenter::Renderer() const noexcept {
 	return m_impl->renderer;
 }
 
-void Presenter::Present(Frame& frame) {
+bool Presenter::Present(Frame& frame, Performance::PresentationClass classification) {
 	const Layer layer {&frame, 0, false};
-	Present(std::span(&layer, 1));
+	return Present(std::span(&layer, 1), classification);
 }
 
-void Presenter::Present(std::span<const Layer> layers) {
+bool Presenter::Present(std::span<const Layer> layers,
+                        Performance::PresentationClass classification) {
 	Common::LockGuard lock(m_impl->present_mutex);
 	for (const auto& layer: layers) {
 		EXIT_IF(layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size()));
@@ -948,7 +961,22 @@ void Presenter::Present(std::span<const Layer> layers) {
 		}
 		previous = layer;
 	}
-	m_impl->Present();
+	return PresentClassified(classification);
+}
+
+bool Presenter::PresentClassified(Performance::PresentationClass classification) {
+	const bool telemetry_enabled = Performance::Enabled();
+	const auto begin = telemetry_enabled ? std::chrono::steady_clock::now()
+	                                     : std::chrono::steady_clock::time_point {};
+	const bool presented = m_impl->Present();
+	if (telemetry_enabled) {
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		    std::chrono::steady_clock::now() - begin);
+		Performance::Presentation(presented ? classification
+		                                    : Performance::PresentationClass::Failed,
+		                          static_cast<uint64_t>(std::max<int64_t>(0, elapsed.count())));
+	}
+	return presented;
 }
 
 void Presenter::ClearLayer(int bus) {
@@ -963,7 +991,7 @@ void Presenter::ClearLayer(int bus) {
 	}
 }
 
-void Presenter::Impl::Present() {
+bool Presenter::Impl::Present() {
 	KYTY_PROFILER_FUNCTION();
 
 	const auto overlay_visual = GetSystemOverlayVisualState();
@@ -999,9 +1027,10 @@ void Presenter::Impl::Present() {
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
-		return;
+		return true;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
+	return false;
 }
 
 void Presenter::Discard(Frame& frame) {

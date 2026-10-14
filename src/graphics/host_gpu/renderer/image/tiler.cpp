@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/performanceTelemetry.h"
 #include "gpu_tiler_shaders/gpu_tiler_demote_d16_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_depth_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_promote_d16_spv.h"
@@ -301,6 +302,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 	    vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
 	    vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer, {}, 0,
 	    nullptr, 3, barriers, 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers, 3);
 	if (clear_target) {
 		command.fillBuffer(target, target_offset, target_capacity, 0);
 		barriers[1].srcAccessMask = vk::AccessFlagBits::eTransferWrite;
@@ -309,6 +311,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 		command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 		                        vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 1,
 		                        &barriers[1], 0, nullptr);
+		Performance::Add(Performance::Counter::BufferBarriers);
 	}
 
 	const vk::DescriptorBufferInfo source_info {source, source_descriptor_offset, source_range};
@@ -339,6 +342,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
 	                        vk::PipelineStageFlagBits::eAllCommands, {}, 0, nullptr, 1,
 	                        &barriers[1], 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers);
 }
 
 TileManager::Result TileManager::Detile(vk::Buffer tiled, uint64_t tiled_offset,
@@ -519,6 +523,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 	command.pipelineBarrier(
 	    vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
 	    vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 2, barriers, 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers, 2);
 	command.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
 	const auto& limits              = m_graphics.GetPhysicalDeviceProperties().limits;
 	const auto descriptor_alignment = std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4);
@@ -584,6 +589,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
 	                        vk::PipelineStageFlagBits::eAllCommands, {}, 0, nullptr, 1,
 	                        &barriers[1], 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers);
 }
 
 void TileManager::TransformColor(Result input, Result output, ColorTransform transform,
@@ -644,6 +650,7 @@ void TileManager::TransformColor(Result input, Result output, ColorTransform tra
 	command.pipelineBarrier(
 	    vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
 	    vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 2, barriers, 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers, 2);
 	command.bindPipeline(vk::PipelineBindPoint::eCompute, m_color_transform);
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, m_pipeline_layout, 0,
 	                             static_cast<uint32_t>(writes.size()), writes.data());
@@ -661,6 +668,7 @@ void TileManager::TransformColor(Result input, Result output, ColorTransform tra
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
 	                        vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &barriers[1],
 	                        0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers);
 }
 
 TileManager::Result TileManager::TransformColor(Result input, ColorTransform transform,

@@ -379,7 +379,8 @@ SDL_VULKAN_LIBRARY=/path/to/libMoltenVK.dylib ./kyty_emulator --game "/games/Exa
 ```
 
 Run `kyty_emulator --help` to see the available graphics, logging, validation, profiling, and
-debugging options.
+debugging options. See [Gameplay performance telemetry](docs/performance.md) for bounded
+CPU/GPU captures, Tracy integration, JSON report semantics, and comparison guidance.
 
 ### AI Use
 

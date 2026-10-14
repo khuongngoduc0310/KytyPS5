@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -55,6 +56,7 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		dependency.bufferMemoryBarrierCount = 1;
 		dependency.pBufferMemoryBarriers    = &before;
 		command.pipelineBarrier2(dependency);
+		Performance::Add(Performance::Counter::BufferBarriers);
 		const vk::BufferCopy copy {offset, destination_offset, chunk};
 		command.copyBuffer(m_staging_buffer.Handle(), buffer.Handle(), 1, &copy);
 		auto after          = before;
@@ -64,6 +66,9 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		after.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 		dependency.pBufferMemoryBarriers = &after;
 		command.pipelineBarrier2(dependency);
+		Performance::Add(Performance::Counter::BufferBarriers);
+		Performance::Add(Performance::Counter::UploadRanges);
+		Performance::Add(Performance::Counter::UploadBytes, chunk);
 		bytes += chunk;
 		address += chunk;
 		size -= chunk;
@@ -185,6 +190,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
 	                       nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers);
 	native.copyBuffer(buffer.Handle(), download.Handle(),
 	                  static_cast<uint32_t>(copies.size()), copies.data());
 
@@ -198,6 +204,9 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	                       vk::PipelineStageFlagBits::eAllCommands |
 	                           vk::PipelineStageFlagBits::eHost,
 	                       {}, 0, nullptr, 1, &after, 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers);
+	Performance::Add(Performance::Counter::DownloadRanges, copies.size());
+	Performance::Add(Performance::Counter::DownloadBytes, total_size);
 	auto publish = [this, mapped, offset, total_size, buffer_address,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		(owner ? *owner : m_download_buffer).Invalidate(offset, total_size);
@@ -210,7 +219,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
 		const auto tick = m_scheduler.CurrentTick();
-		m_scheduler.Wait(tick);
+		m_scheduler.Wait(tick, Performance::WaitReason::Readback);
 		m_scheduler.WaitPriorityOperations(tick);
 		publish();
 	}
@@ -426,6 +435,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 		                       vk::PipelineStageFlagBits::eTransfer,
 		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
+		Performance::Add(Performance::Counter::BufferBarriers);
 		native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()),
 		                  copies.data());
 		auto after          = before;
@@ -434,6 +444,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 		                       vk::PipelineStageFlagBits::eAllCommands,
 		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
+		Performance::Add(Performance::Counter::BufferBarriers);
 	}
 	if (is_texel_buffer && !is_written) {
 		return SynchronizeBufferFromImage(buffer, vaddr, size);
@@ -455,9 +466,12 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 			copy.srcOffset += base_offset;
 		}
 		m_staging_buffer.Commit();
+		Performance::Add(Performance::Counter::UploadRanges, copies.size());
+		Performance::Add(Performance::Counter::UploadBytes, total_size);
 		return m_staging_buffer.Handle();
 	}
 
+	Performance::Add(Performance::Counter::TemporaryUploadFallbacks);
 	auto temporary = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Upload, 0,
 	                                         vk::BufferUsageFlagBits::eTransferSrc, total_size);
 	for (const auto& copy: copies) {
@@ -467,6 +481,8 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	}
 	temporary->Flush(0, total_size);
 	const auto handle = temporary->Handle();
+	Performance::Add(Performance::Counter::UploadRanges, copies.size());
+	Performance::Add(Performance::Counter::UploadBytes, total_size);
 	m_scheduler.DeferOperation([owner = std::move(temporary)]() mutable { owner.reset(); });
 	return handle;
 }
@@ -624,13 +640,21 @@ void BufferCache::RunGarbageCollector() {
 		return;
 	}
 
+	Performance::ScopedDuration gc_time(Performance::Duration::BufferGarbageCollection);
+	Performance::Add(Performance::Counter::BufferGcRuns);
 	const bool     aggressive = m_total_used_memory >= m_critical_gc_memory;
 	const uint64_t age        = std::min<uint64_t>(aggressive ? 80 : 160, tick);
 	const size_t   limit      = aggressive ? 64 : 32;
+	if (aggressive) {
+		Performance::Add(Performance::Counter::BufferGcAggressiveRuns);
+	}
 
 	std::vector<BufferId> dirty_buffers;
+	uint64_t              scanned = 0;
+	uint64_t              dirty_bytes = 0;
 	size_t                retire_count = 0;
 	m_lru_cache.ForEachItemBelow(tick - age, [&](BufferId id) {
+		scanned++;
 		auto& buffer = m_slot_buffers[id];
 		EXIT_IF(buffer.is_deleted);
 		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges, buffer.CpuAddress(),
@@ -641,6 +665,7 @@ void BufferCache::RunGarbageCollector() {
 		}
 		if (dirty) {
 			EXIT_NOT_IMPLEMENTED(!DownloadBufferMemory<true>(buffer, buffer.CpuAddress(), buffer.Size()));
+			dirty_bytes += buffer.Size();
 			dirty_buffers.push_back(id);
 		} else {
 			m_memory_tracker.UntrackMemory(buffer.CpuAddress(), buffer.Size());
@@ -648,13 +673,16 @@ void BufferCache::RunGarbageCollector() {
 		}
 		return ++retire_count == limit;
 	});
+	Performance::Add(Performance::Counter::BufferGcScanned, scanned);
+	Performance::Add(Performance::Counter::BufferGcRetired, retire_count);
+	Performance::Add(Performance::Counter::BufferGcDirtyBytes, dirty_bytes);
 	if (dirty_buffers.empty()) {
 		return;
 	}
 
 	// Publish all queued downloads before releasing their tracked pages and owners.
 	const auto completion_tick = m_scheduler.CurrentTick();
-	m_scheduler.Wait(completion_tick);
+	m_scheduler.Wait(completion_tick, Performance::WaitReason::GarbageCollection);
 	m_scheduler.WaitPriorityOperations(completion_tick);
 	for (const auto id: dirty_buffers) {
 		auto& buffer = m_slot_buffers[id];

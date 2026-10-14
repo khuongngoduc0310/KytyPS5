@@ -23,6 +23,9 @@ inline constexpr uint32_t DeepOrangeA200 = 0xff6e40;
 namespace Profiler {
 
 void SetThreadName(const char* name);
+void GameplayFrame(bool collected, uint64_t interval_nanoseconds, uint64_t captured_frames,
+                   uint64_t native_draws, uint64_t native_dispatches, uint64_t queue_depth,
+                   uint64_t gpu_timing_results);
 
 void Initialize();
 void Shutdown();

@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "gpu_tiler_shaders/fault_buffer_process_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
@@ -76,7 +77,7 @@ FaultManager::~FaultManager() {
 
 void FaultManager::ProcessFaultBuffer() {
 	if (const auto wait_tick = m_fault_areas[m_current_area]; wait_tick != 0) {
-		m_scheduler.Wait(wait_tick);
+		m_scheduler.Wait(wait_tick, Performance::WaitReason::Readback);
 		m_scheduler.PopPendingOperations();
 	}
 
@@ -118,6 +119,7 @@ void FaultManager::ProcessFaultBuffer() {
 	dependency.bufferMemoryBarrierCount = 1;
 	dependency.pBufferMemoryBarriers    = &pre_barrier;
 	command.pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::BufferBarriers);
 	command.bindPipeline(vk::PipelineBindPoint::eCompute, m_fault_process_pipeline);
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,
 	                             m_fault_process_pipeline_layout, 0, writes);
@@ -126,6 +128,7 @@ void FaultManager::ProcessFaultBuffer() {
 	command.dispatch(static_cast<uint32_t>(num_workgroups), 1, 1);
 	dependency.pBufferMemoryBarriers = &post_barrier;
 	command.pipelineBarrier2(dependency);
+	Performance::Add(Performance::Counter::BufferBarriers);
 
 	const auto area = m_current_area;
 	m_scheduler.DeferOperation([this, mapped, offset, area] {

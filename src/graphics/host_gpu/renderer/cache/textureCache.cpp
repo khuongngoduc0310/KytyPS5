@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/tile.h"
@@ -1746,6 +1747,7 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	m_scheduler.Current().Handle().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                                               vk::PipelineStageFlagBits::eHost, {}, 0, nullptr,
 	                                               1, &barrier, 0, nullptr);
+	Performance::Add(Performance::Counter::BufferBarriers);
 	m_scheduler.DeferPriorityOperation([&download, range, mapped, offset] {
 		download.Invalidate(offset, range.size);
 		LibKernel::Memory::WriteBacking(range.address, mapped, range.size);
@@ -1871,9 +1873,17 @@ void TextureCache::RunGarbageCollector() {
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;
 	}
+	Performance::ScopedDuration gc_time(Performance::Duration::TextureGarbageCollection);
+	Performance::Add(Performance::Counter::TextureGcRuns);
+	uint64_t scanned = 0;
+	uint64_t retired = 0;
+	uint64_t dirty_bytes = 0;
 	const auto collect = [&](bool allow_aggressive) {
 		bool           pressured  = m_total_used_memory >= m_pressure_gc_memory;
 		bool           aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
+		if (aggressive) {
+			Performance::Add(Performance::Counter::TextureGcAggressiveRuns);
+		}
 		const uint64_t age       = std::min<uint64_t>(aggressive ? 160 : pressured ? 80 : 16, tick);
 		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
 		std::vector<ImageId> candidates;
@@ -1882,6 +1892,7 @@ void TextureCache::RunGarbageCollector() {
 		// first.
 		m_lru_cache.ForEachItemBelow(tick - age, [&](ImageId id) {
 			candidates.push_back(id);
+			scanned++;
 			return candidates.size() == deletions;
 		});
 		for (const auto id: candidates) {
@@ -1901,11 +1912,17 @@ void TextureCache::RunGarbageCollector() {
 				if (safe && !pressured) {
 					continue;
 				}
-				if (safe && !DownloadImageMemory(id)) {
-					continue;
+				if (safe) {
+					const auto bytes = owner->info.data.size + owner->info.stencil.size +
+					                   owner->info.metadata.range.size;
+					if (!DownloadImageMemory(id)) {
+						continue;
+					}
+					dirty_bytes += bytes;
 				}
 			}
 			FreeImage(id);
+			retired++;
 			if (m_total_used_memory < m_critical_gc_memory && aggressive) {
 				deletions >>= 2;
 				aggressive = false;
@@ -1920,6 +1937,9 @@ void TextureCache::RunGarbageCollector() {
 	if (m_total_used_memory >= m_critical_gc_memory) {
 		collect(true);
 	}
+	Performance::Add(Performance::Counter::TextureGcScanned, scanned);
+	Performance::Add(Performance::Counter::TextureGcRetired, retired);
+	Performance::Add(Performance::Counter::TextureGcDirtyBytes, dirty_bytes);
 }
 
 void TextureCache::ProcessDownloadImages() {

@@ -6,6 +6,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/performanceTelemetry.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -974,6 +975,12 @@ void WindowContext::CreateVulkan() {
 	graphic_ctx.max_push_descriptors       = push_descriptor_properties.maxPushDescriptors;
 	graphic_ctx.physical_device.getMemoryProperties(&graphic_ctx.physical_device_memory_properties);
 	const auto& device_properties = graphic_ctx.GetPhysicalDeviceProperties();
+	const auto queue_properties = graphic_ctx.physical_device.getQueueFamilyProperties();
+	EXIT_IF(graphic_ctx.queue_family >= queue_properties.size());
+	graphic_ctx.queue_timestamp_valid_bits =
+	    queue_properties[graphic_ctx.queue_family].timestampValidBits;
+	graphic_ctx.timestamp_period_nanoseconds = device_properties.limits.timestampPeriod;
+	Performance::SetGpuMetadata(device_properties.deviceName.data(), device_properties.driverVersion);
 
 	LOGF("Select device: %s\n", device_properties.deviceName.data());
 

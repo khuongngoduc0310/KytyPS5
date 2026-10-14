@@ -4,11 +4,13 @@
 #include "common/common.h"
 #include "common/uniqueFunction.h"
 #include "graphics/host_gpu/renderer/dynamicState.h"
+#include "graphics/host_gpu/renderer/gpuTimestampCollector.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/render.h"
 
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <thread>
 #include <vector>
@@ -17,7 +19,8 @@ namespace Libs::Graphics {
 
 class CommandScheduler {
 public:
-	CommandScheduler(RenderContext& context, GraphicContext& graphics);
+	CommandScheduler(RenderContext& context, GraphicContext& graphics,
+	                 Performance::SchedulerDomain domain = Performance::SchedulerDomain::Guest);
 	~CommandScheduler();
 	KYTY_CLASS_NO_COPY(CommandScheduler);
 
@@ -33,7 +36,8 @@ public:
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
 	// the priority runner cannot join itself.
 	void                      Shutdown();
-	void                      Wait(uint64_t tick);
+	void                      Wait(uint64_t tick,
+	                               Performance::WaitReason reason = Performance::WaitReason::Generic);
 	void                      PopPendingOperations();
 	void                      DrainPriorityOperations();
 	void                      WaitPriorityOperations(uint64_t tick);
@@ -90,9 +94,12 @@ private:
 	MasterSemaphore              m_master;
 	RenderContext&               m_context;
 	GraphicContext&              m_graphics;
+	Performance::SchedulerDomain m_domain;
 	CommandPool                  m_command_pool;
 	CommandBuffer                m_command;
 	DynamicState                 m_dynamic_state;
+	GpuTimestampCollector        m_timestamps;
+	std::optional<GpuTimestampCollector::Token> m_timestamp_token;
 	std::queue<PendingOperation> m_pending_operations;
 	std::queue<PendingOperation> m_priority_operations;
 	std::mutex                   m_operation_mutex;
