@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
+#include <cstdint>
 
 namespace Libs::Graphics {
 
@@ -12,7 +13,8 @@ struct GraphicContext;
 
 class MasterSemaphore {
 public:
-	explicit MasterSemaphore(GraphicContext& graphics);
+	// domain tags the owning scheduler in device-loss diagnostics (0 = guest, 1 = presentation).
+	explicit MasterSemaphore(GraphicContext& graphics, uint8_t domain = 0);
 	~MasterSemaphore();
 	KYTY_CLASS_NO_COPY(MasterSemaphore);
 
@@ -28,11 +30,13 @@ public:
 	}
 	[[nodiscard]] vk::Semaphore Handle() const noexcept { return m_semaphore; }
 
-	void Refresh();
-	void Wait(uint64_t tick);
+	// Both report false once the device is lost, so callers can skip unsafe GPU work.
+	[[nodiscard]] bool Refresh();
+	[[nodiscard]] bool Wait(uint64_t tick);
 
 private:
 	GraphicContext&       m_graphics;
+	uint8_t               m_domain = 0;
 	vk::Semaphore         m_semaphore = nullptr;
 	std::atomic<uint64_t> m_gpu_tick {0};
 	std::atomic<uint64_t> m_current_tick {1};

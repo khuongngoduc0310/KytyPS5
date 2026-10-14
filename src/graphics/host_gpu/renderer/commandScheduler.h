@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "common/uniqueFunction.h"
+#include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/dynamicState.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -29,7 +30,7 @@ public:
 	void           FlushAndWait();
 	void           Finish();
 	CommandBuffer& BeginCommand();
-	uint64_t       Submit(SubmitInfo submit = {});
+	[[nodiscard]] std::optional<uint64_t> Submit(SubmitInfo submit = {});
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
 	// the priority runner cannot join itself.
 	void                      Shutdown();
@@ -43,7 +44,9 @@ public:
 	[[nodiscard]] bool        HasPendingPriorityOperations();
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
-	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
+	[[nodiscard]] bool Active() const noexcept {
+		return !m_graphics.vulkan_fault.IsDeviceLost() && m_command.m_registers != nullptr;
+	}
 	void                           CheckActive() const;
 	CommandBuffer&                 Current();
 	[[nodiscard]] uint64_t         CurrentTick() const noexcept { return m_master.CurrentTick(); }
@@ -99,6 +102,7 @@ private:
 	std::condition_variable      m_operation_available;
 	std::jthread                 m_priority_thread;
 	bool                         m_priority_active      = false;
+	uint8_t                       m_domain               = 0;
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;
 };

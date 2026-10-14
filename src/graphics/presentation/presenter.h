@@ -33,10 +33,11 @@ public:
 	[[nodiscard]] bool           PresentLastFrame();
 	[[nodiscard]] bool           IsGuestPaused() const noexcept;
 	[[nodiscard]] bool           IsHdrSupported() const noexcept;
+	[[nodiscard]] bool           IsDeviceLost() const noexcept;
 	[[nodiscard]] bool           NeedsSystemOverlayRefresh() const noexcept;
 	[[nodiscard]] RenderContext& Renderer() const noexcept;
-	void                         Present(Frame& frame);
-	void                         Present(std::span<const Layer> layers);
+	[[nodiscard]] bool           Present(Frame& frame);
+	[[nodiscard]] bool           Present(std::span<const Layer> layers);
 	void                         ClearLayer(int bus);
 	void                         Discard(Frame& frame);
 

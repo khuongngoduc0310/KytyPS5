@@ -3,10 +3,12 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/vulkanFault.h"
 
 namespace Libs::Graphics {
 
-MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics) {
+MasterSemaphore::MasterSemaphore(GraphicContext& graphics, uint8_t domain)
+    : m_graphics(graphics), m_domain(domain) {
 	vk::SemaphoreTypeCreateInfo type_info {};
 	type_info.semaphoreType = vk::SemaphoreType::eTimeline;
 	type_info.initialValue  = 0;
@@ -24,25 +26,40 @@ MasterSemaphore::~MasterSemaphore() {
 	}
 }
 
-void MasterSemaphore::Refresh() {
+bool MasterSemaphore::Refresh() {
+	if (m_graphics.vulkan_fault.IsDeviceLost()) {
+		return false;
+	}
 	uint64_t   counter = 0;
 	const auto result  = m_graphics.device.getSemaphoreCounterValue(m_semaphore, &counter);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess) {
+		RecordVulkanDeviceLoss(m_graphics, {.operation = VulkanOperation::SemaphoreQuery,
+		                                    .result    = result,
+		                                    .domain    = m_domain});
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eErrorDeviceLost);
+		return false;
+	}
 
 	auto known = m_gpu_tick.load(std::memory_order_acquire);
 	while (known < counter &&
 	       !m_gpu_tick.compare_exchange_weak(known, counter, std::memory_order_release,
 	                                         std::memory_order_relaxed)) {
 	}
+	return true;
 }
 
-void MasterSemaphore::Wait(uint64_t tick) {
-	if (IsFree(tick)) {
-		return;
+bool MasterSemaphore::Wait(uint64_t tick) {
+	if (m_graphics.vulkan_fault.IsDeviceLost()) {
+		return false;
 	}
-	Refresh();
 	if (IsFree(tick)) {
-		return;
+		return true;
+	}
+	if (!Refresh()) {
+		return false;
+	}
+	if (IsFree(tick)) {
+		return true;
 	}
 
 	vk::SemaphoreWaitInfo wait_info {};
@@ -53,8 +70,15 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
 	                                         Common::DebugCounters::Counter::GpuWaitNs);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-	Refresh();
+	if (result != vk::Result::eSuccess) {
+		RecordVulkanDeviceLoss(m_graphics, {.operation = VulkanOperation::SemaphoreWait,
+		                                    .result    = result,
+		                                    .domain    = m_domain,
+		                                    .tick      = tick});
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eErrorDeviceLost);
+		return false;
+	}
+	return Refresh();
 }
 
 } // namespace Libs::Graphics
