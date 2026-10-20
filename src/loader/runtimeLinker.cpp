@@ -1242,6 +1242,29 @@ void RuntimeLinker::SaveProgram(Program* program, const std::filesystem::path& e
 	}
 }
 
+static Program* LoadBundledModule(RuntimeLinker* rt, const std::string& module_name) {
+	std::string core = module_name;
+	if (core.starts_with("libSce")) {
+		core = core.substr(6);
+	}
+	if (core.ends_with(".prx")) {
+		core = core.substr(0, core.size() - 4);
+	}
+
+	const std::vector<std::string> candidates = {
+	    "/app0/sce_module/libSce" + core + ".prx",
+	    "/app0/sce_module/" + core + ".prx",
+	    "/app0/sce_module/" + core,
+	};
+	for (const auto& candidate: candidates) {
+		const auto path = Libs::LibKernel::FileSystem::GetRealFilename(candidate);
+		if (Common::File::IsFileExisting(path) && rt->FindProgramByFileName(path) == nullptr) {
+			return rt->LoadProgram(path);
+		}
+	}
+	return nullptr;
+}
+
 void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 	KYTY_PROFILER_THREAD("Thread_Main");
 
@@ -1263,6 +1286,26 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 	// The runtime automatically loads libc; other PRXs are requested by the application.
 	const auto libc_path = Libs::LibKernel::FileSystem::GetRealFilename("/app0/sce_module/libc.prx");
 	auto* libc = Common::File::IsFileExisting(libc_path) ? LoadProgram(libc_path) : nullptr;
+
+	// Titles link against bundled modules at load time (e.g. libSceNpCppWebApi.prx) and expect
+	// the loader to resolve those imports before the entry point. Load them now so their exports
+	// resolve during RelocateAll() instead of being patched to null-returning stub thunks.
+	std::vector<std::string> needed_modules;
+	for (const auto* p: m_programs) {
+		if (p != nullptr && p->elf != nullptr && !p->elf->IsShared() &&
+		    p->dynamic_info != nullptr) {
+			for (const auto& module: p->dynamic_info->import_modules) {
+				needed_modules.push_back(module.name);
+			}
+		}
+	}
+	std::vector<Program*> auto_modules;
+	for (const auto& name: needed_modules) {
+		if (auto* loaded = LoadBundledModule(this, name); loaded != nullptr) {
+			auto_modules.push_back(loaded);
+		}
+	}
+
 	RelocateAll();
 
 	if (!game_patch.empty()) {
@@ -1273,6 +1316,11 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 	}
 	if (libc != nullptr && libc->dynamic_info->init_vaddr != 0) {
 		StartModule(libc, 0, nullptr, nullptr);
+	}
+	for (auto* module: auto_modules) {
+		if (module->dynamic_info != nullptr && module->dynamic_info->init_vaddr != 0) {
+			StartModule(module, 0, nullptr, nullptr);
+		}
 	}
 
 	LOGF_COLOR(Log::Color::BrightYellow, "---\n--- Execute: %s\n---\n", "Main");
