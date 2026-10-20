@@ -895,9 +895,13 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
-	state.programs = pipeline_cache.GetGraphicsPrograms(
-	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
-	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info);
+	state.programs = [&] {
+		Common::DebugCounters::ScopedDuration probe(
+		    Common::DebugCounters::Counter::ProbeProgramsNs);
+		return pipeline_cache.GetGraphicsPrograms(
+		    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
+		    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info);
+	}();
 }
 
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
@@ -1163,20 +1167,29 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
 		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
+		Common::DebugCounters::ScopedDuration probe(
+		    Common::DebugCounters::Counter::ProbeVertexNs);
 		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
 		index_binding   = PrepareIndexBuffer(buffer, index_source);
 	}
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
-	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
-	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
-	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
-	    state.programs);
+	auto& pipeline = [&]() -> auto& {
+		Common::DebugCounters::ScopedDuration probe(
+		    Common::DebugCounters::Counter::ProbePipelineNs);
+		return m_context.GetPipelineCache().GetGraphicsPipeline(
+		    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
+		    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
+		    state.programs);
+	}();
 	vk::ImageAspectFlags feedback_aspects;
-	const auto rendering =
-	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
-	                         feedback_aspects, stages);
+	const auto rendering = [&] {
+		Common::DebugCounters::ScopedDuration probe(
+		    Common::DebugCounters::Counter::ProbeTargetsNs);
+		return AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
+		                            feedback_aspects, stages);
+	}();
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest

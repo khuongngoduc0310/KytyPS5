@@ -68,6 +68,27 @@ Measured with `KYTY_PM4_PROBE=1`, which logs every `EVENT_WRITE` type plus the d
 - **The current synthetic write does not match this layout.** It writes 16 slots at 16-byte stride starting at `event_address`, whereas the guest uses one u64 per event at that event's own address with an 8-byte begin/end offset. Any real implementation must write a single u64 per `ZPASS_DONE`, not a 16-slot fan-out.
 - Open question carried into Phase 1: which member of the pair the guest polls for `ready_bit`. The end slot is the natural answer, but it must be verified before writing the result (see Phase 1 step 6).
 
+### Per-draw attribution result - the GPU thread is spent in shader program selection
+
+Timers added around the four unmeasured steps of `RenderExecutor`'s draw path. Gameplay windows (ms/s of wall clock, all nested inside `process`):
+
+| phase | ms/s | share of `process` (~1010) |
+|---|---|---|
+| `GetGraphicsPrograms` (`RefreshShaders`) | **486-736** | **48-73%** |
+| `gpu-wait` | 288-497 | 29-49% |
+| `fault` | 132-261 | 13-26% |
+| `submit` | 43-98 | 4-10% |
+| `bind` (`PrepareBindings`) | 20-24 | ~2% |
+| `GetGraphicsPipeline` | ~1.0 | ~0.1% |
+| vertex/index acquisition | 2.1-2.6 | ~0.2% |
+| render-target acquisition | 2.6-21.5 | ~0.3-2% |
+
+In the light scene the same timer falls to 155-161 ms/s, confirming the cost scales with draws per frame rather than being a one-off.
+
+Conclusion: the dominant CPU cost is shader program selection and its per-draw resource materialization, not pipeline creation, buffer acquisition or target resolution. Pipeline/buffer/target timers are all negligible, so Phase 3 (submit coalescing) and further cache work are not where the remaining time is.
+
+Second finding from the same run: `frange` 174-545 vs `fbyte` 4218-6862 per second, i.e. **roughly 95% of faults still fall back to byte scope** - most faulting addresses have no bounded containing buffer, or the buffer exceeds the 256 KiB cap. Phase 2's measured win therefore came from the small slice that did resolve. Widening to textures or raising the cap is a smaller further win; the real fault cost is that most faults are not buffer-covered at all.
+
 ### Phase 2 result - fault cost halved
 
 Implementation: `BufferCache::FindRegisteredRange` resolves the cached buffer containing the fault address (ordered, non-overlapping map), and `RenderContext::HandleFault` now invalidates or reads that whole range instead of one byte, capped at 256 KiB. Ranges without a bounded containing buffer keep the previous byte scope. Textures deliberately stay byte-scoped: their aliases are tracked separately and no benefit was measured there.

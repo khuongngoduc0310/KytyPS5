@@ -50,6 +50,11 @@ enum class Counter {
 	OcclusionSamples,   // Sum of resolved sample counts, to judge whether counts are meaningful.
 	FaultRangeResolved, // Faults resolved against the whole containing cached buffer.
 	FaultByteFallback,  // Faults that had no bounded containing buffer and stayed byte-scoped.
+	// TEMPORARY attribution timers for the per-draw CPU path.
+	ProbeProgramsNs,    // Shader program selection / resource materialization.
+	ProbePipelineNs,    // Graphics pipeline lookup or creation.
+	ProbeVertexNs,      // Vertex and index buffer acquisition.
+	ProbeTargetsNs,     // Render target and texture acquisition.
 	// TEMPORARY: phase attribution for the KYTY_FPS_PROBE diagnostic.
 	ProbeSubmitNs,
 	ProbeFaultNs,
