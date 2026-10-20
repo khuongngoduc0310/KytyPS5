@@ -68,6 +68,24 @@ Measured with `KYTY_PM4_PROBE=1`, which logs every `EVENT_WRITE` type plus the d
 - **The current synthetic write does not match this layout.** It writes 16 slots at 16-byte stride starting at `event_address`, whereas the guest uses one u64 per event at that event's own address with an 8-byte begin/end offset. Any real implementation must write a single u64 per `ZPASS_DONE`, not a 16-slot fan-out.
 - Open question carried into Phase 1: which member of the pair the guest polls for `ready_bit`. The end slot is the natural answer, but it must be verified before writing the result (see Phase 1 step 6).
 
+### Root cause of the program-selection cost
+
+`pipelineCache.cpp` `SourceEntry::FindPermutation` calls `MaterializeResources` before comparing any candidate, so every lookup runs the full SRT walk (guest-memory reads included) per draw, per stage:
+
+```cpp
+EXIT_IF(!MaterializeResources(resource_plan, runtime, resources, specialization));
+for (auto& candidate: permutations) { ... if (candidate.specialization != specialization) continue; ... }
+```
+
+At ~2900 draws/s that is ~5800 materialisations/s. No cache can absorb it today because `SourceEntry` holds a single shared `resources`/`specialization` pair for all permutations and the caller reads `&entry->second.resources`, so there is nowhere to retain a per-state result. `PrepareProgram` adds a global-mutex lookup plus a `ShaderMapEntry` copy per stage; `GetGraphicsPipeline`, vertex/index acquisition and target resolution are all negligible by measurement.
+
+Two candidate fixes:
+
+- **A. Per-permutation memo key.** Give each `Permutation` its own `ResourceSnapshot` and a `memo_key` = hash(user_data words, shader_base, push_data_cursor, workgroup/indirect state); keep `unordered_map<uint64_t, Permutation*>` per `SourceEntry`. One walk per distinct state instead of per draw. Real fix, medium risk, grows memory per distinct state.
+- **B. Static-plan fast path.** When `!requires_specialization_memory && source_reads.empty() && !capture_specialization_reads` and there is no indirect descriptor, `specialization` cannot depend on `user_data`, so the first permutation can be returned without materialising. Small, low risk, payoff unknown until measured.
+
+Prefer B first: it is a contained predicate plus an early return, and it tells us how many programs are actually state-dependent before committing to A's memory and structural cost.
+
 ### Per-draw attribution result - the GPU thread is spent in shader program selection
 
 Timers added around the four unmeasured steps of `RenderExecutor`'s draw path. Gameplay windows (ms/s of wall clock, all nested inside `process`):
