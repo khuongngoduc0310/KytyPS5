@@ -2,6 +2,7 @@
 
 #include "common/abi.h"
 #include "common/assert.h"
+#include "graphics/host_gpu/hostMemory.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <xbyak/xbyak.h>
@@ -38,8 +39,12 @@ bool SrtReadCapture::ReadOrdinary(void* userdata, uint64_t address, std::span<ui
 	auto& capture = *static_cast<SrtReadCapture*>(userdata);
 	if (capture.m_source.read_memory != nullptr) {
 		if (!capture.m_source.read_memory(capture.m_source.userdata, address, values)) return false;
-	} else {
+	} else if (HostMemoryRangeIsReadable(address, values.size_bytes())) {
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+	} else {
+		// An unbound or malformed SRT descriptor resolves to a non-guest address (e.g. 0x18).
+		// Hardware reads such an address back as zero, so return zeroes instead of faulting.
+		std::fill(values.begin(), values.end(), 0u);
 	}
 	capture.m_ranges.emplace_back(address, values.size_bytes());
 	return true;
@@ -744,7 +749,12 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 	} else {
 		if (vector) return false;
-		std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+		if (HostMemoryRangeIsReadable(address, sizeof(word))) {
+			std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+		} else {
+			// Unreadable SRT address reads back as zero on hardware; never fault the host.
+			word = 0;
+		}
 	}
 	result = word;
 	return true;
