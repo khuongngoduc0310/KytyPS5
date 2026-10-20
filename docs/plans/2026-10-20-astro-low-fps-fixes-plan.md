@@ -68,6 +68,24 @@ Measured with `KYTY_PM4_PROBE=1`, which logs every `EVENT_WRITE` type plus the d
 - **The current synthetic write does not match this layout.** It writes 16 slots at 16-byte stride starting at `event_address`, whereas the guest uses one u64 per event at that event's own address with an 8-byte begin/end offset. Any real implementation must write a single u64 per `ZPASS_DONE`, not a 16-slot fan-out.
 - Open question carried into Phase 1: which member of the pair the guest polls for `ready_bit`. The end slot is the natural answer, but it must be verified before writing the result (see Phase 1 step 6).
 
+### Fix B result - static-specialization fast path, plus a regression I introduced
+
+Two changes shipped together; the measurement below does not separate them.
+
+1. **Removed my own hot-path regression.** The Phase 1 SRT guard called `HostMemoryRangeIsReadable` from `SrtReadCapture::ReadOrdinary`, which is the same per-read path resource materialisation uses. That helper does a `VirtualQuery` on Windows and opens `/proc/self/maps` on Linux - per SRT read, per draw, per stage. Replaced with a single integer compare against a 4 GiB guest-address floor (`LooksLikeGuestAddress`), which still catches the non-guest `0x18` case.
+2. **Fix B: static-specialization fast path.** `SourceEntry::StaticPlan()` admits plans with no SRT reads, no specialization-read capture, no specialization-memory requirement and **no `GetUserData` anywhere**; the first permutation and its snapshot are retained and reused. The new `ResourcePlan::reads_user_data` flag is set conservatively at extraction, because `srt_reads.empty()` alone was **not** sufficient: descriptor values can resolve through `GetUserData`, which is draw-dependent.
+
+Measured, light scene (47-53 fps, 0.6-0.8 k draws/s):
+
+| counter | before | after |
+|---|---|---|
+| `prog` ms/s | 155-161 | **7.8-10.1** |
+| fps | ~50 | 47-53 |
+
+At 50 fps `gpu-wait` is 884-950 ms/s, i.e. the emulator is GPU-bound again in this scene, which is the desired end state.
+
+Not yet verified: the heavy gameplay scene (2.9 k draws/s) was not reached in this run's sampled window, so the per-draw win there is inferred rather than measured.
+
 ### Root cause of the program-selection cost
 
 `pipelineCache.cpp` `SourceEntry::FindPermutation` calls `MaterializeResources` before comparing any candidate, so every lookup runs the full SRT walk (guest-memory reads included) per draw, per stage:

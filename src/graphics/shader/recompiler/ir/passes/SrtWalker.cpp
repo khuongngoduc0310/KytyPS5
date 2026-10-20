@@ -2,7 +2,6 @@
 
 #include "common/abi.h"
 #include "common/assert.h"
-#include "graphics/host_gpu/hostMemory.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <xbyak/xbyak.h>
@@ -16,6 +15,19 @@
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+constexpr uint64_t AddressMask = 0x0000ffffffffffffull;
+
+// Guest memory is mapped far above 4 GiB in this emulator (guest code starts at the loader's
+// SYSTEM_RESERVED). An unbound or malformed SRT descriptor resolves to a small non-guest address
+// such as 0x18; hardware reads those back as zero. This is a single compare on purpose: a real
+// readability probe (VirtualQuery, or /proc/self/maps on Linux) must never run here because this
+// is the per-read path inside resource materialisation, which executes per draw and per stage.
+constexpr uint64_t MinGuestAddress = 0x100000000ull;
+
+bool LooksLikeGuestAddress(uint64_t address, size_t size) noexcept {
+	return address >= MinGuestAddress && size <= UINT64_MAX - address;
+}
 
 SrtRuntime SrtReadCapture::ObservedRuntime() {
 	auto runtime = m_source;
@@ -39,7 +51,7 @@ bool SrtReadCapture::ReadOrdinary(void* userdata, uint64_t address, std::span<ui
 	auto& capture = *static_cast<SrtReadCapture*>(userdata);
 	if (capture.m_source.read_memory != nullptr) {
 		if (!capture.m_source.read_memory(capture.m_source.userdata, address, values)) return false;
-	} else if (HostMemoryRangeIsReadable(address, values.size_bytes())) {
+	} else if (LooksLikeGuestAddress(address, values.size_bytes())) {
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 	} else {
 		// An unbound or malformed SRT descriptor resolves to a non-guest address (e.g. 0x18).
@@ -58,8 +70,6 @@ SrtRuntime CleanRuntime(SrtRuntime runtime) {
 }
 
 namespace {
-
-constexpr uint64_t AddressMask = 0x0000ffffffffffffull;
 
 bool AddSignedAddress(uint64_t base, int64_t offset, uint64_t& result) {
 	if (base > AddressMask) {
@@ -749,7 +759,7 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 	} else {
 		if (vector) return false;
-		if (HostMemoryRangeIsReadable(address, sizeof(word))) {
+		if (LooksLikeGuestAddress(address, sizeof(word))) {
 			std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
 		} else {
 			// Unreadable SRT address reads back as zero on hardware; never fault the host.

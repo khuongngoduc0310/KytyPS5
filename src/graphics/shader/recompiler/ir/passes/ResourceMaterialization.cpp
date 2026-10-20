@@ -1320,6 +1320,12 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	plan.source_reads               = program.source_reads;
 	plan.srt_plan_complete          = program.srt_plan_complete;
 	plan.resource_tracking_complete = program.resource_tracking_complete;
+	for (const auto& value: program.value_storage) {
+		if (value.GetOpcode() == ValueOpcode::GetUserData) {
+			plan.reads_user_data = true;
+			break;
+		}
+	}
 
 	std::unordered_map<const Inst*, Inst*> cloned;
 	std::function<Value(Value)>            Clone = [&](Value value) -> Value {

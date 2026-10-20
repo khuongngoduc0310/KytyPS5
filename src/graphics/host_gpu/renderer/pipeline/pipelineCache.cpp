@@ -237,6 +237,20 @@ struct PipelineCache::ProgramCache {
 			permutations.reserve(8);
 		}
 
+		// Fast path for plans whose specialization cannot depend on the draw state: no SRT reads
+		// at all, and nothing that captures or requires specialization memory. For those the walk
+		// in MaterializeResources always produces the same answer, so it only has to run once.
+		[[nodiscard]] bool StaticPlan() const {
+			const auto& plan = resource_plan;
+			return !plan.requires_specialization_memory && !plan.capture_specialization_reads &&
+			       !plan.reads_user_data && plan.source_reads.empty() && plan.srt_reads.empty();
+		}
+
+		bool                                         static_valid = false;
+		size_t                                       static_index = 0;
+		ShaderRecompiler::IR::ResourceSnapshot       static_resources;
+		ShaderRecompiler::IR::ResourceSpecialization static_specialization;
+
 		std::span<const uint32_t> FunctionCode() const {
 			return call_source
 			    ? std::span<const uint32_t>(call_source->linked->code).subspan(call_source->code.size())
@@ -253,6 +267,16 @@ struct PipelineCache::ProgramCache {
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                             uint32_t push_data_cursor) {
+			if (static_valid && static_index < permutations.size() && StaticPlan()) {
+				const auto& cached = permutations[static_index];
+				if (cached.program.bindings.push_data_start_dword ==
+				    ShaderRecompiler::IR::PushData::StartFor(push_data_cursor,
+				                                             cached.program.bindings.ShaderDataDwords())) {
+					resources      = static_resources;
+					specialization = static_specialization;
+					return &permutations[static_index];
+				}
+			}
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    resource_plan, runtime, resources, specialization));
 			for (auto& candidate: permutations) {
@@ -451,6 +475,10 @@ struct PipelineCache::ProgramCache {
 			    entry->second.specialization));
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+			// The plan changed, so a previously captured static specialization may no longer
+			// describe it.
+			entry->second.static_valid = false;
+			entry->second.static_index = 0;
 			if (const auto* permutation = entry->second.FindPermutation<true>(runtime, push_data_cursor)) {
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
@@ -460,6 +488,12 @@ struct PipelineCache::ProgramCache {
 		entry->second.permutations.push_back(CompilePermutation(
 		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
 		    entry->second.FunctionCode()));
+		if (entry->second.StaticPlan()) {
+			entry->second.static_valid          = true;
+			entry->second.static_index          = entry->second.permutations.size() - 1;
+			entry->second.static_resources      = entry->second.resources;
+			entry->second.static_specialization = entry->second.specialization;
+		}
 		const auto& permutation = entry->second.permutations.back();
 		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
