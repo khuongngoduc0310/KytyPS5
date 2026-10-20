@@ -1020,8 +1020,7 @@ bool Presenter::PresentLastFrame() {
 	if (m_impl->layers[0].frame == nullptr && m_impl->layers[1].frame == nullptr) {
 		return false;
 	}
-	m_impl->Present();
-	return true;
+	return m_impl->Present();
 }
 
 bool Presenter::IsGuestPaused() const noexcept {
@@ -1080,7 +1079,7 @@ void Presenter::ClearLayer(int bus) {
 	}
 }
 
-void Presenter::Impl::Present() {
+bool Presenter::Impl::Present() {
 	KYTY_PROFILER_FUNCTION();
 
 	if (window.graphic_ctx.vulkan_fault.IsDeviceLost()) {

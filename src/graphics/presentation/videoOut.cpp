@@ -1104,7 +1104,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 		return;
 	}
 
-	const bool          special = IsSpecialBufferIndex(index);
+	bool                special = IsSpecialBufferIndex(index);
 	Graphics::ImageInfo source_info;
 	uint32_t            width   = 0;
 	uint32_t            height  = 0;

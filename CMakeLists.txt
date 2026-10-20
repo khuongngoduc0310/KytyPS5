@@ -445,12 +445,7 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
-	"${KYTY_TESTS_DIR}/PerformanceTelemetryTests.cpp"
-)
 
-	"${KYTY_TESTS_DIR}/ShaderModuleCacheTests.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaderModuleCache.cpp"
-)
 
 add_executable(vulkan_fault_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/VulkanFaultTests.cpp"
@@ -638,11 +633,6 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_present_mode_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --present-mode Invalid)
 	set_tests_properties(emulator_present_mode_invalid PROPERTIES WILL_FAIL TRUE)
-	         COMMAND $<TARGET_FILE:kyty_emulator> --help --performance-report capture.json
-	                 --performance-warmup-frames 2 --performance-capture-frames 3)
-	         COMMAND $<TARGET_FILE:kyty_emulator> --help --performance-warmup-frames 2)
-	         COMMAND $<TARGET_FILE:kyty_emulator> --help
-	                 --performance-capture-frames 4294967296 --profile)
 	add_test(NAME vulkan_fault COMMAND $<TARGET_FILE:vulkan_fault_tests>)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
