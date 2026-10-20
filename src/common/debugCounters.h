@@ -48,6 +48,8 @@ enum class Counter {
 	OcclusionFallbacks, // Pairs that fell back to always-visible.
 	OcclusionZero,      // Resolved pairs reporting zero depth-test samples (fully occluded).
 	OcclusionSamples,   // Sum of resolved sample counts, to judge whether counts are meaningful.
+	FaultRangeResolved, // Faults resolved against the whole containing cached buffer.
+	FaultByteFallback,  // Faults that had no bounded containing buffer and stayed byte-scoped.
 	// TEMPORARY: phase attribution for the KYTY_FPS_PROBE diagnostic.
 	ProbeSubmitNs,
 	ProbeFaultNs,

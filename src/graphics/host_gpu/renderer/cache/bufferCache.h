@@ -76,6 +76,9 @@ public:
 	                bool src_gds);
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
 	[[nodiscard]] bool IsRegionRegistered(uint64_t vaddr, uint64_t size);
+	// Cached buffer range containing vaddr, or {0, 0} when the address is not backed by one.
+	// Used by the fault handler so one fault can resolve the whole range instead of one byte.
+	[[nodiscard]] std::pair<uint64_t, uint64_t> FindRegisteredRange(uint64_t vaddr);
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);

@@ -68,6 +68,25 @@ Measured with `KYTY_PM4_PROBE=1`, which logs every `EVENT_WRITE` type plus the d
 - **The current synthetic write does not match this layout.** It writes 16 slots at 16-byte stride starting at `event_address`, whereas the guest uses one u64 per event at that event's own address with an 8-byte begin/end offset. Any real implementation must write a single u64 per `ZPASS_DONE`, not a 16-slot fan-out.
 - Open question carried into Phase 1: which member of the pair the guest polls for `ready_bit`. The end slot is the natural answer, but it must be verified before writing the result (see Phase 1 step 6).
 
+### Phase 2 result - fault cost halved
+
+Implementation: `BufferCache::FindRegisteredRange` resolves the cached buffer containing the fault address (ordered, non-overlapping map), and `RenderContext::HandleFault` now invalidates or reads that whole range instead of one byte, capped at 256 KiB. Ranges without a bounded containing buffer keep the previous byte scope. Textures deliberately stay byte-scoped: their aliases are tracked separately and no benefit was measured there.
+
+Measured on comparable windows (same scene shape: ~3.6-4.1 k draws/s, ~0.9-1.2 k dispatches/s):
+
+| counter | before | after |
+|---|---|---|
+| `fault` ms/s | 510-610 | **238-282** |
+| faults/s | 3100-3560 | 2403-3129 |
+| fps | 11.8-15 | 13.8-18 |
+
+Two conclusions:
+
+1. **Roughly half the per-fault cost is gone.** Fault *count* fell only ~20% while total fault time fell ~50%, which fits the mechanism: `BufferCache::ReadMemory` does a synchronous GPU-thread round-trip, so a wider resolution both removes round-trips and unprotects the pages that would have faulted next (`ChangeState<Cpu,true>` clears the watch over the whole range).
+2. **A meaningful share of faults still fall back to byte scope**, since resolving every fault against its buffer would have cut the count far more than 20%. `frange`/`fbyte` counters now report that split on the next run; widening to textures or raising the 256 KiB cap depends on that number.
+
+Caveat: the fps move is confounded by scene variance (dispatch rate differed between windows). The trustworthy result is `fault` ms/s, which is a direct measurement of the handler.
+
 ### Phase 1 result - implemented, faithful, currently inert
 
 Implementation: `RenderContext` owns a `VK_QUERY_TYPE_OCCLUSION` pool of 64 queries; slots are keyed by the pair base address; the pair-first event issues `vkCmdBeginQuery`, the pair-second issues `vkCmdEndQuery`; the count is read from a deferred priority operation one cycle later.
@@ -251,7 +270,7 @@ Follow-up before this can help: establish why the proxy draws between the pair m
 - [ ] Probe harness permanent, opt-in, and extended with named phase counters.
 - [x] Occlusion begin/end semantics documented from the PM4 stream (pair `(A, A+8)`, one draw between).
 - [~] Real occlusion queries implemented, delta-correct, opt-in; counts are currently all-visible so no culling win yet (see Phase 1 result).
-- [ ] Fault resolution is range-scoped with page-scope fallback for absent/oversized ranges.
+- [x] Fault resolution is range-scoped with byte-scope fallback for absent/oversized ranges (fault ms/s 510-610 -> 238-282).
 - [ ] Flush reasons classified per call site; opportunistic flushes coalesce; mandatory ones do not.
 - [ ] Pipeline creation no longer blocks the render thread past the configured budget.
 - [ ] Per-phase counter deltas recorded against the baseline table in this document.

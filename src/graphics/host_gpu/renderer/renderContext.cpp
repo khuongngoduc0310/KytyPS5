@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/videoOut.h"
@@ -127,17 +128,39 @@ VideoOut::VideoOutDriver& RenderContext::GetVideoOut() const {
 }
 
 bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept {
-	// The host reports the faulting byte, not the instruction's access width. Both caches
-	// resolve its page; guessing a width can cross the end of a valid guest mapping.
+	// The host reports the faulting byte, not the instruction's access width.
 	constexpr uint64_t fault_size = 1;
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
 	}
+
+	// Resolve against the whole cached buffer that contains the fault. Taking one fault per buffer
+	// instead of one per 4 KiB page matters because BufferCache::ReadMemory does a synchronous
+	// GPU-thread round-trip, and InvalidateRegion unprotects every page it covers, so a wider
+	// resolution also prevents the follow-on faults.
+	//
+	// Textures keep the byte-scoped behaviour: their aliases are tracked separately and a wide
+	// texture invalidation has no measured benefit here.
+	constexpr uint64_t max_fault_range = 256u * 1024u;
+	auto [range_addr, range_size] = m_buffer_cache.FindRegisteredRange(fault_vaddr);
+	const bool range_ok = range_size != 0 && range_size <= max_fault_range;
+
+	Common::DebugCounters::Add(range_ok ? Common::DebugCounters::Counter::FaultRangeResolved
+	                                    : Common::DebugCounters::Counter::FaultByteFallback);
+
 	if (access == PageFaultAccess::Write) {
-		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+		if (range_ok) {
+			m_buffer_cache.InvalidateMemory(range_addr, range_size);
+		} else {
+			m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+		}
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
-		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (range_ok) {
+			m_buffer_cache.ReadMemory(range_addr, range_size);
+		} else {
+			m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		}
 	}
 	return true;
 }

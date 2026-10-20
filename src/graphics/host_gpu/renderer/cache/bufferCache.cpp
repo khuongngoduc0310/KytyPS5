@@ -605,6 +605,21 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	dst->CopyFrom(command, *src, src_offset, dst_offset, size);
 }
 
+std::pair<uint64_t, uint64_t> BufferCache::FindRegisteredRange(uint64_t vaddr) {
+	// Buffers are ordered and non-overlapping, so the last one starting at or before vaddr is the
+	// only candidate that can contain it.
+	const auto candidate = m_buffers.upper_bound(vaddr);
+	if (candidate == m_buffers.begin()) {
+		return {0, 0};
+	}
+	const auto& [address, id] = *std::prev(candidate);
+	const auto  size          = m_slot_buffers[id].Size();
+	if (size == 0 || vaddr - address >= size) {
+		return {0, 0};
+	}
+	return {address, size};
+}
+
 bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid registered-region query\n");
