@@ -17,6 +17,8 @@
 
 #include <memory>
 #include <shared_mutex>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::VideoOut {
@@ -53,6 +55,19 @@ public:
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
+
+	// Guest occlusion queries. The PS5 exposes a query as a ZPASS_DONE pair (begin at A, end at
+	// A+8) with one culling draw between them. Slots are keyed by the pair base address and the
+	// sample count is published to guest memory once the submission carrying the end retires.
+	static constexpr uint32_t OcclusionSlots = 64;
+	// Returns a stable slot for the pair base, or -1 when tracking is unavailable/exhausted.
+	[[nodiscard]] int32_t OcclusionAcquire(uint64_t base_addr) noexcept;
+	void                  OcclusionBegin(uint32_t slot, CommandBuffer& buffer);
+	void                  OcclusionEnd(uint32_t slot, CommandBuffer& buffer);
+	// Reads the finished count and resets the slot for reuse. False when the result is not ready.
+	[[nodiscard]] bool OcclusionResolve(uint32_t slot, uint64_t& count) noexcept;
+	// Clears a slot without publishing (unpaired or abandoned query).
+	void OcclusionReset(uint32_t slot) noexcept;
 	void               PrepareBda();
 	void               RunGarbageCollector();
 
@@ -78,6 +93,9 @@ private:
 	TextureCache              m_texture_cache;
 	mutable std::shared_mutex m_mapped_ranges_mutex;
 	RangeSet                  m_mapped_ranges;
+	vk::QueryPool             m_occlusion_pool = nullptr;
+	std::mutex                m_occlusion_mutex;
+	std::unordered_map<uint64_t, uint32_t> m_occlusion_slots;
 	std::unique_ptr<GuestGpu> m_gpu;
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 	bool                      m_fault_process_pending = false;

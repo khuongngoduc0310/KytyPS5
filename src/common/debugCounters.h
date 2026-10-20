@@ -44,6 +44,10 @@ enum class Counter {
 	GuestFileReadBytes,
 	GuestFileWriteBytes,
 	AudioUnderruns,
+	OcclusionResolved,  // Real host sample counts published for a ZPASS_DONE pair.
+	OcclusionFallbacks, // Pairs that fell back to always-visible.
+	OcclusionZero,      // Resolved pairs reporting zero depth-test samples (fully occluded).
+	OcclusionSamples,   // Sum of resolved sample counts, to judge whether counts are meaningful.
 	// TEMPORARY: phase attribution for the KYTY_FPS_PROBE diagnostic.
 	ProbeSubmitNs,
 	ProbeFaultNs,

@@ -1378,20 +1378,104 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 			}
 			static std::once_flag warning_once;
 			std::call_once(warning_once, [] {
-				std::printf("Warning: game uses occlusion queries, which are currently treated as "
-				            "always visible; GPU usage may be higher and FPS may be lower.\n");
+				std::printf("Note: game uses occlusion queries; reporting host depth-test samples "
+				            "per ZPASS_DONE pair (always-visible when a single pair cannot be "
+				            "resolved). Use --no-occlusion-queries to force always-visible.\n");
 			});
 
-			// Until host occlusion queries are implemented, publish an always-visible result. The
-			// PS5 layout contains one interleaved begin/end pair per DB, and bit 63 marks a result
-			// ready.
+			// A query is a ZPASS_DONE pair: begin at A, one culling draw, end at A+8. The begin
+			// member has bit 3 clear and the end member has it set. Bit 63 of the published u64
+			// marks a result ready, the low bits hold the depth-test sample count.
 			constexpr uint64_t ready_bit    = 1ull << 63u;
 			constexpr uint64_t counter_mask = ready_bit - 1u;
-			auto*              results      = reinterpret_cast<volatile uint64_t*>(event_address);
-			const auto         value        = ready_bit | m_synthetic_occlusion_counter;
-			for (uint32_t db = 0; db < 16u; db++) {
-				results[db * 2u] = value;
+			const auto         base         = event_address & ~uint64_t {0x8u};
+			const bool         is_end       = (event_address & 0x8u) != 0u;
+
+			if (!Config::OcclusionQueriesEnabled()) {
+				*reinterpret_cast<volatile uint64_t*>(event_address) =
+				    ready_bit | (m_synthetic_occlusion_counter & counter_mask);
+				m_synthetic_occlusion_counter =
+				    (m_synthetic_occlusion_counter + 1u) & counter_mask;
+				break;
 			}
+
+			auto& render_context = m_renderer;
+
+			if (!is_end) {
+				// An unpaired begin means the previous pair never closed: keep the guest unblocked
+				// with a visible result and drop the stale slot.
+				if (m_occlusion_open_slot >= 0) {
+					render_context.OcclusionReset(static_cast<uint32_t>(m_occlusion_open_slot));
+					*reinterpret_cast<volatile uint64_t*>(m_occlusion_open_base + 0x8u) =
+					    ready_bit | (m_synthetic_occlusion_counter & counter_mask);
+					m_synthetic_occlusion_counter =
+					    (m_synthetic_occlusion_counter + 1u) & counter_mask;
+					m_occlusion_open_slot = -1;
+				}
+				const auto slot = render_context.OcclusionAcquire(base);
+				if (slot < 0) {
+					*reinterpret_cast<volatile uint64_t*>(event_address) =
+					    ready_bit | (m_synthetic_occlusion_counter & counter_mask);
+					m_synthetic_occlusion_counter =
+					    (m_synthetic_occlusion_counter + 1u) & counter_mask;
+					break;
+				}
+				render_context.OcclusionBegin(static_cast<uint32_t>(slot), CurrentBuffer());
+				m_occlusion_open_slot = slot;
+				m_occlusion_open_base = base;
+				// The guest reads a (begin, end) pair, so the pair base carries the zero baseline of
+				// this cycle's sample counter and the end member carries the count itself.
+				*reinterpret_cast<volatile uint64_t*>(event_address) = ready_bit;
+				break;
+			}
+
+			if (m_occlusion_open_slot >= 0 && m_occlusion_open_base == base) {
+				const auto slot    = static_cast<uint32_t>(m_occlusion_open_slot);
+				const auto address = event_address;
+				// Publish the last resolved count for this slot immediately, exactly like hardware,
+				// which reports a query a few frames late. Publishing only after the submission
+				// retires would make the guest round-trip to the GPU for every query (measured as a
+				// 10-19 fps -> 4 fps collapse). The first use of a slot has no count yet, so it gets a
+				// visible value and can never cull real geometry.
+				const auto visible = m_synthetic_occlusion_counter & counter_mask;
+				m_synthetic_occlusion_counter =
+				    (m_synthetic_occlusion_counter + 1u) & counter_mask;
+				const auto found  = m_occlusion_last.find(slot);
+				const auto canned = found != m_occlusion_last.end() ? found->second : visible;
+				*reinterpret_cast<volatile uint64_t*>(address) = ready_bit | canned;
+
+				render_context.OcclusionEnd(slot, CurrentBuffer());
+				m_occlusion_open_slot = -1;
+				GetScheduler().DeferPriorityOperation(
+				    [&render_context, slot, address, visible, this] {
+					    uint64_t   count = 0;
+					    const auto ready = 1ull << 63u;
+					    if (render_context.OcclusionResolve(slot, count)) {
+						    Common::DebugCounters::Add(
+						        Common::DebugCounters::Counter::OcclusionResolved);
+						    // Only remember it; the value published this cycle is intentionally the previous
+						    // one, so the guest never waits on a result.
+						    m_occlusion_last[slot] = count & (ready - 1u);
+						    if ((count & (ready - 1u)) == 0u) {
+							    Common::DebugCounters::Add(
+							        Common::DebugCounters::Counter::OcclusionZero);
+						    }
+						    Common::DebugCounters::Add(
+						        Common::DebugCounters::Counter::OcclusionSamples,
+						        count & (ready - 1u));
+					    } else {
+						    Common::DebugCounters::Add(
+						        Common::DebugCounters::Counter::OcclusionFallbacks);
+						    m_occlusion_last[slot] = visible;
+						    render_context.OcclusionReset(slot);
+					    }
+				    });
+				break;
+			}
+
+			// End without a matching begin: publish visible rather than under-report.
+			*reinterpret_cast<volatile uint64_t*>(event_address) =
+			    ready_bit | (m_synthetic_occlusion_counter & counter_mask);
 			m_synthetic_occlusion_counter = (m_synthetic_occlusion_counter + 1u) & counter_mask;
 			break;
 		}

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -183,6 +184,11 @@ private:
 	const int m_interrupt_event_id;
 	uint64_t  m_submit_id                   = 0;
 	uint64_t  m_synthetic_occlusion_counter = 0;
+	int32_t   m_occlusion_open_slot         = -1;
+	uint64_t  m_occlusion_open_base         = 0;
+	// Last resolved sample count per slot. Published one cycle late, like hardware, so the guest
+	// never has to wait for a result and never sees a not-ready slot.
+	std::unordered_map<uint32_t, uint64_t> m_occlusion_last;
 	bool      m_predicate_skip              = false;
 };
 

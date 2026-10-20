@@ -68,6 +68,23 @@ Measured with `KYTY_PM4_PROBE=1`, which logs every `EVENT_WRITE` type plus the d
 - **The current synthetic write does not match this layout.** It writes 16 slots at 16-byte stride starting at `event_address`, whereas the guest uses one u64 per event at that event's own address with an 8-byte begin/end offset. Any real implementation must write a single u64 per `ZPASS_DONE`, not a 16-slot fan-out.
 - Open question carried into Phase 1: which member of the pair the guest polls for `ready_bit`. The end slot is the natural answer, but it must be verified before writing the result (see Phase 1 step 6).
 
+### Phase 1 result - implemented, faithful, currently inert
+
+Implementation: `RenderContext` owns a `VK_QUERY_TYPE_OCCLUSION` pool of 64 queries; slots are keyed by the pair base address; the pair-first event issues `vkCmdBeginQuery`, the pair-second issues `vkCmdEndQuery`; the count is read from a deferred priority operation one cycle later.
+
+Two findings changed the design:
+
+1. **Value shape is a delta, not an absolute.** Publishing one absolute count makes the guest react violently: same build, same session, draws per frame doubled (291 -> 624), dispatches collapsed 830 -> 340/s, fps 12-15 -> 5-6. The guest consumes the pair and computes `end - begin`. The implementation therefore publishes `ready|0` at the begin member and `ready|last count` at the end member.
+2. **Publishing only after retirement serialises the guest.** With the value written solely by the deferred operation, the guest round-trips to the GPU for every query and fps fell to 4-6. Writing a stale-but-ready value inline (hardware-like latency) restored parity.
+
+Measured with delta semantics, same build, `--occlusion-queries` on vs off: fps 11.8-14.8 vs 12-15, draws 3617-3969 vs 3580-3990/s, dispatches 830-1033 vs 830-1030/s, submits 4087-5066 vs 4070-5000/s, `fb 0`. **Parity, no regression and no win.**
+
+Count distribution explains the lack of a win: over ~38 queries/s, `zero 0` and `samples` 16-19 M/s, i.e. every query reports hundreds of thousands of samples and none is ever fully occluded. The guest's culling proxy draws pass depth in the emulator, so real occlusion data says "everything visible" - the same answer the synthetic path gave.
+
+Decision: the feature is **opt-in** (`--occlusion-queries`, default off). It is faithful and costs nothing meaningful, but shipping it on by default would change behaviour with no measured benefit and no proof the counts are correct.
+
+Follow-up before this can help: establish why the proxy draws between the pair members pass depth (depth state, Hi-Z, or the wrong draw being bracketed). Until then occlusion cannot cull and the GPU-overdraw theory is unconfirmed; treat the Phase 2/3 CPU costs as the actionable levers.
+
 ## Product Contract
 
 ### Requirements
@@ -233,7 +250,7 @@ Measured with `KYTY_PM4_PROBE=1`, which logs every `EVENT_WRITE` type plus the d
 
 - [ ] Probe harness permanent, opt-in, and extended with named phase counters.
 - [x] Occlusion begin/end semantics documented from the PM4 stream (pair `(A, A+8)`, one draw between).
-- [ ] Real occlusion queries implemented with a tested synthetic fallback toggle.
+- [~] Real occlusion queries implemented, delta-correct, opt-in; counts are currently all-visible so no culling win yet (see Phase 1 result).
 - [ ] Fault resolution is range-scoped with page-scope fallback for absent/oversized ranges.
 - [ ] Flush reasons classified per call site; opportunistic flushes coalesce; mandatory ones do not.
 - [ ] Pipeline creation no longer blocks the render thread past the configured budget.

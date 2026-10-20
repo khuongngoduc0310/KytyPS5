@@ -67,6 +67,10 @@ struct ConfigOptions {
 	bool                   splash_enabled              = true;
 	bool                   vr_enabled                  = false;
 	bool                   amd_cpu_enabled             = false;
+	// Report real host depth-test samples for guest occlusion queries instead of always-visible.
+	// Opt-in: the counts are faithful but currently always non-zero (see the low-FPS plan), so
+	// enabling it changes no measured behaviour and stays behind a flag until that is understood.
+	bool                   occlusion_queries_enabled   = false;
 	bool                   network_connected           = false;
 	uint32_t               vblank_frequency            = 60;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
@@ -124,6 +128,7 @@ bool     HdrEnabled();
 bool     HideCursorEnabled();
 bool     VrEnabled();
 bool     AmdCpuEnabled();
+bool     OcclusionQueriesEnabled();
 bool     IsNetworkConnected();
 uint32_t GetVblankFrequency();
 uint32_t GetConsoleLanguage();

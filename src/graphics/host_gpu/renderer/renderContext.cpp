@@ -17,11 +17,83 @@ RenderContext::RenderContext(GraphicContext& graphics)
       m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache),
       m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+
+	if (Config::OcclusionQueriesEnabled()) {
+		vk::QueryPoolCreateInfo info {};
+		info.queryType  = vk::QueryType::eOcclusion;
+		info.queryCount = OcclusionSlots;
+		if (m_graphics.device.createQueryPool(&info, nullptr, &m_occlusion_pool) !=
+		    vk::Result::eSuccess) {
+			m_occlusion_pool = nullptr;
+		} else {
+			// Host-side reset is legal before any query is recorded (Vulkan 1.2).
+			m_graphics.device.resetQueryPool(m_occlusion_pool, 0, OcclusionSlots);
+		}
+	}
+}
+
+int32_t RenderContext::OcclusionAcquire(uint64_t base_addr) noexcept {
+	if (m_occlusion_pool == nullptr) {
+		return -1;
+	}
+	std::lock_guard lock(m_occlusion_mutex);
+	if (const auto it = m_occlusion_slots.find(base_addr); it != m_occlusion_slots.end()) {
+		return static_cast<int32_t>(it->second);
+	}
+	if (m_occlusion_slots.size() >= OcclusionSlots) {
+		return -1;
+	}
+	const auto slot = static_cast<uint32_t>(m_occlusion_slots.size());
+	m_occlusion_slots.emplace(base_addr, slot);
+	return static_cast<int32_t>(slot);
+}
+
+void RenderContext::OcclusionBegin(uint32_t slot, CommandBuffer& buffer) {
+	if (m_occlusion_pool == nullptr || slot >= OcclusionSlots) {
+		return;
+	}
+	buffer.Handle().beginQuery(m_occlusion_pool, slot, vk::QueryControlFlagBits::ePrecise);
+}
+
+void RenderContext::OcclusionEnd(uint32_t slot, CommandBuffer& buffer) {
+	if (m_occlusion_pool == nullptr || slot >= OcclusionSlots) {
+		return;
+	}
+	buffer.Handle().endQuery(m_occlusion_pool, slot);
+}
+
+bool RenderContext::OcclusionResolve(uint32_t slot, uint64_t& count) noexcept {
+	if (m_occlusion_pool == nullptr || slot >= OcclusionSlots) {
+		return false;
+	}
+	std::lock_guard lock(m_occlusion_mutex);
+	uint64_t packed = 0;
+	const auto result = m_graphics.device.getQueryPoolResults(
+	    m_occlusion_pool, slot, 1, sizeof(packed), &packed, sizeof(packed),
+	    vk::QueryResultFlagBits::e64);
+	if (result != vk::Result::eSuccess) {
+		return false;
+	}
+	m_graphics.device.resetQueryPool(m_occlusion_pool, slot, 1);
+	count = packed;
+	return true;
+}
+
+void RenderContext::OcclusionReset(uint32_t slot) noexcept {
+	if (m_occlusion_pool == nullptr || slot >= OcclusionSlots) {
+		return;
+	}
+	std::lock_guard lock(m_occlusion_mutex);
+	m_graphics.device.resetQueryPool(m_occlusion_pool, slot, 1);
 }
 
 RenderContext::~RenderContext() {
 	ShutdownGpu();
 	m_command_scheduler.Shutdown();
+	if (m_occlusion_pool != nullptr) {
+		m_graphics.device.destroyQueryPool(m_occlusion_pool, nullptr);
+		m_occlusion_pool = nullptr;
+	}
 }
 
 void RenderContext::InitializeGpu(VideoOut::VideoOutDriver* video_out) {

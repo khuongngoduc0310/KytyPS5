@@ -85,6 +85,7 @@ static void PrintUsage() {
 	::printf("  --graphics-debug-dump <true|false>   Enable graphics debug dumps.\n");
 	::printf("  --printf-direction <value>           Silent, Console, or File.\n");
 	::printf("  --printf-output-file <path>          Guest printf output file.\n");
+	::printf("  --occlusion-queries                  Report real host occlusion samples (opt-in).\n");
 	::printf("  --profile                            Enable the Tracy profiler.\n");
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
@@ -244,6 +245,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 
 		if (arg == "--amd-cpu") {
 			options.config.amd_cpu_enabled = true;
+			continue;
+		}
+
+		if (arg == "--occlusion-queries") {
+			options.config.occlusion_queries_enabled = true;
 			continue;
 		}
 
