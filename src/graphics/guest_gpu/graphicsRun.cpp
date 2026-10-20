@@ -25,6 +25,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -1285,6 +1286,49 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 		     "\t event_index = 0x%08" PRIx32 "\n"
 		     "\t address     = 0x%016" PRIx64 "\n",
 		     event_type, event_index, event_address);
+	}
+
+	if (std::getenv("KYTY_PM4_PROBE") != nullptr) {
+		// TEMPORARY Phase-0 spike: reveal which PM4 EVENT_WRITE types this title emits and in what
+		// order relative to the ZPASS_DONE (0x39) occlusion dump, so the query window can be
+		// derived from real guest markers instead of guessed.
+		static std::array<uint32_t, 96> recent {};
+		static uint32_t                 recent_count = 0;
+		static uint32_t                 recent_total = 0;
+		static uint32_t                 zpass_events = 0;
+		static uint64_t                 zpass_prev_draws = 0;
+		static std::mutex               probe_mutex;
+
+		std::lock_guard probe_lock(probe_mutex);
+		if (event_type == 0x39) {
+			zpass_events++;
+			if (zpass_events <= 48) {
+				const auto draws_now = Common::DebugCounters::Get(
+				    Common::DebugCounters::Counter::Draws);
+				const auto draws_delta = draws_now - zpass_prev_draws;
+				zpass_prev_draws       = draws_now;
+				std::printf("[pm4] ZPASS_DONE #%u idx=0x%x addr=0x%016llx draws_since_prev=%llu "
+				            "events_since_prev=%u seq=",
+				            zpass_events, event_index,
+				            static_cast<unsigned long long>(event_address),
+				            static_cast<unsigned long long>(draws_delta), recent_total);
+				for (uint32_t i = 0; i < recent_count; i++) {
+					std::printf("%x ", recent[i]);
+				}
+				if (recent_total > recent_count) {
+					std::printf("...(+%u)", recent_total - recent_count);
+				}
+				std::fputc(10, stdout);
+				std::fflush(stdout);
+			}
+			recent_count = 0;
+			recent_total = 0;
+		} else {
+			recent_total++;
+			if (recent_count < recent.size()) {
+				recent[recent_count++] = event_type;
+			}
+		}
 	}
 
 	const auto valid_cache_event_index = event_index == 0x00000000 || event_index == 0x00000007;

@@ -57,6 +57,17 @@ Code anchors:
 - `src/graphics/guest_gpu/graphicsRun.cpp:254-256` — `BufferFlush()` → `GetScheduler().Flush()` → `Flush(SubmitInfo&)` → `Submit`. Flush call sites: `609`, `630`, `643`, `1052`, `1369`, `1389`, `1418`, `1435`.
 - `src/graphics/host_gpu/renderer/pipeline/shaders.cpp:244,595` — `CreatePipelineInternal` (graphics and compute) calls `createGraphicsPipelines`/`createComputePipelines` synchronously, driven from `pipelineCache.cpp:1020-1030` and `1055-1065` on first use.
 
+### Phase 0 spike result - occlusion marker semantics (resolved)
+
+Measured with `KYTY_PM4_PROBE=1`, which logs every `EVENT_WRITE` type plus the draw-count delta and the event sequence between consecutive `ZPASS_DONE` (`0x39`) events.
+
+- **There are no dedicated occlusion begin/end event types.** The guest uses `ZPASS_DONE` only. All other types on this title are cache flush / partial flush / writeback (`0x10`, `0x16`, `0x31`, `0x2a`, `0x2c`, `0x2e`, `0x07`, `0x0f`) plus the ignored writeback set.
+- **A query is a pair of consecutive `ZPASS_DONE` writes 8 bytes apart:** `(A, A+8)`, where `event_index` is always `0x1`.
+- **Exactly one draw happens between the pair members.** Observed deltas across 48 events: pair-first deltas `11` (×20) and `8` (×3), pair-second delta `1` (×24). So the shape is *begin snapshot → 1 culling draw → end snapshot*, and the culling draw is what the count describes.
+- **Queries rotate through fixed slots.** Three slots per pass, `0x1C0` apart (`...6f80`, `...6dc0`, `...6c00`, and a second pass block at `...6640`, `...6800`, `...69c0`), reused across frames. At least two passes are active, so ≥6 concurrent query objects.
+- **The current synthetic write does not match this layout.** It writes 16 slots at 16-byte stride starting at `event_address`, whereas the guest uses one u64 per event at that event's own address with an 8-byte begin/end offset. Any real implementation must write a single u64 per `ZPASS_DONE`, not a 16-slot fan-out.
+- Open question carried into Phase 1: which member of the pair the guest polls for `ready_bit`. The end slot is the natural answer, but it must be verified before writing the result (see Phase 1 step 6).
+
 ## Product Contract
 
 ### Requirements
@@ -86,7 +97,7 @@ Code anchors:
 ## Settled Technical Decisions
 
 - **KTD1. Occlusion first.** It is the largest measured lever (the GPU is the wall; gpu-wait is the dominant term) and the only change that reduces the total work both guest and host must do.
-- **KTD2. Query scope follows the guest's own markers, not heuristics.** The plan does not invent which draws belong to a query; Phase 0 must locate the guest begin/end markers or establish that `0x39` is the only observable boundary. Do not guess a query window from draw counts.
+- **KTD2. Query scope is the observed `(A, A+8)` `ZPASS_DONE` pair.** Phase 0 resolved this: no separate begin/end event types exist, and exactly one draw sits between the pair members. Reopen this decision only if a title is found that emits a different shape.
 - **KTD3. Fallback must stay cheap and correct.** If the guest marker cannot be resolved for a given draw set, report the synthetic visible value for that set and log once, rather than under-reporting and culling visible geometry.
 - **KTD4. Fault scope is the containing cache range, not a fixed larger unit.** Use the existing ordered, non-overlapping buffer map to find the containing range. Do not widen to `TRACKER_REGION_SIZE` (4 MiB): that trades a CPU problem for a bandwidth problem and increases false sharing.
 - **KTD5. Fault handler stays allocation-free and GPU-call-free.** Range lookup and state change only. Any upload or flush stays queued for the GPU thread through the existing `QueueBdaSync`/`on_flush` mechanism.
@@ -111,12 +122,14 @@ Code anchors:
 
 ### Phase 1 - Real host occlusion queries
 
-1. Add a query pool owner beside `GraphicContext` or the guest GPU: one `vk::QueryPool` of `VK_QUERY_TYPE_OCCLUSION`, sized to the DB count found in Phase 0, with reset and result-read helpers.
-2. Wire the guest's begin/end markers (or the `0x39`-derived window from Phase 0) to `vkCmdBeginQuery`/`vkCmdEndQuery` on the recording command buffer.
-3. On `0x39`, replace the synthetic write with `getQueryPoolResults` with `eWait`, honouring that the read must not block the GPU thread indefinitely: if results are unavailable because the responsible submission is not yet retired, either defer the dump to a priority operation after that tick or publish the previous window's counts.
-4. Preserve the guest-visible layout exactly: `ready_bit` in bit 63, count in the low bits, 16 interleaved `(begin, end)` slots.
-5. Add `Config::OcclusionQueries` (default on) so the synthetic path can be restored for AE2; log the chosen mode once.
-6. If a window cannot be resolved, publish the synthetic visible value for that window and count it, rather than under-reporting (KTD3).
+1. Add a query pool owner beside `GraphicContext` or the guest GPU: `vk::QueryPool` of `VK_QUERY_TYPE_OCCLUSION`, sized from the observed slot count (Phase 0: 3 slots per pass, ≥2 passes; size for 16 and index by slot address) with `reset`, `begin`, `end` and deferred result-read helpers.
+2. Map a slot address to a query index keyed by the pair base (`A`), derived from the observed addresses rather than a fixed stride. Do not assume the 16-interleaved layout the synthetic path used.
+3. At the pair-first event (`A`), `vkCmdBeginQuery` on the slot's query. At the pair-second event (`A+8`), `vkCmdEndQuery`. Exactly one draw sits between them (Phase 0), so the query brackets the culling draw.
+4. Write a **single u64** at the event address on resolution, not a 16-slot fan-out. Publish `ready_bit` in bit 63 and the real sample count in the low bits.
+5. Result availability: results are only valid after the submission containing `vkCmdEndQuery` retires. Use the existing `DeferPriorityOperation` keyed on that submission tick to read `getQueryPoolResults` and write guest memory, or publish the previous frame's count for that slot. Do not block the GPU thread on `eWait` indefinitely.
+6. **Verify which slot the guest polls** for `ready_bit` (pair-first vs pair-second) before choosing where to publish. Log the first 16 resolutions with both slot values and the guest's subsequent behaviour; if the poll target cannot be determined, publish the same count to both members of the pair.
+7. Add `Config::OcclusionQueries` (default on) so the synthetic path can be restored for AE2; log the chosen mode once.
+8. If a pair cannot be resolved (missing half, unknown slot, result unavailable for too long), publish the synthetic visible value for that slot and count it, rather than under-reporting (KTD3).
 
 **Files:** `src/graphics/guest_gpu/graphicsRun.cpp`, `src/graphics/guest_gpu/command_processor/pm4Dispatch.cpp`, `src/graphics/host_gpu/graphicContext.{h,cpp}`, `src/graphics/host_gpu/renderer/renderContext.{h,cpp}`, `src/common/emulatorConfig.{h,cpp}`, `src/main.cpp`, `src/launcher/*`.
 
@@ -219,7 +232,7 @@ Code anchors:
 ## Completion Checklist
 
 - [ ] Probe harness permanent, opt-in, and extended with named phase counters.
-- [ ] Occlusion begin/end semantics documented from the PM4 stream.
+- [x] Occlusion begin/end semantics documented from the PM4 stream (pair `(A, A+8)`, one draw between).
 - [ ] Real occlusion queries implemented with a tested synthetic fallback toggle.
 - [ ] Fault resolution is range-scoped with page-scope fallback for absent/oversized ranges.
 - [ ] Flush reasons classified per call site; opportunistic flushes coalesce; mandatory ones do not.
