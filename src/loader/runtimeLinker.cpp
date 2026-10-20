@@ -668,6 +668,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
 			case CoreAccess::Unknown: return false;
 		}
+		Common::DebugCounters::ScopedDuration probe(Common::DebugCounters::Counter::ProbeFaultNs);
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 			return true;

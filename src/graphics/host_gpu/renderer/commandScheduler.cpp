@@ -407,6 +407,7 @@ std::optional<uint64_t> CommandScheduler::Submit(SubmitInfo submit) {
 	vk::Result result;
 	uint64_t   tick;
 	{
+		Common::DebugCounters::ScopedDuration probe(Common::DebugCounters::Counter::ProbeSubmitNs);
 		Common::LockGuard lock(graphics.queue_mutex);
 		tick = m_master.NextTick();
 		submit.AddSignal(m_master.Handle(), tick);

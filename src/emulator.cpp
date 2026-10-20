@@ -2,6 +2,7 @@
 
 #include "common/abi.h"
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -185,6 +186,12 @@ void Run(const RunOptions& options) {
 
 	Libs::LibKernel::FileSystem::Mount(options.app0_dir, "/app0");
 	Libs::LibKernel::FileSystem::Mount(options.app0_dir, "/hostapp");
+
+	// TEMPORARY: KYTY_FPS_PROBE=1 enables the per-second frame/counter probe in
+	// performanceOverlay.cpp. Remove with that probe.
+	if (std::getenv("KYTY_FPS_PROBE") != nullptr) {
+		Common::DebugCounters::SetEnabled(true);
+	}
 
 	MountSandboxDirs();
 

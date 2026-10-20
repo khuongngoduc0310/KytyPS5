@@ -44,6 +44,11 @@ enum class Counter {
 	GuestFileReadBytes,
 	GuestFileWriteBytes,
 	AudioUnderruns,
+	// TEMPORARY: phase attribution for the KYTY_FPS_PROBE diagnostic.
+	ProbeSubmitNs,
+	ProbeFaultNs,
+	ProbeProcessNs,
+	ProbeMaterializeNs,
 	Count
 };
 
@@ -101,6 +106,29 @@ private:
 	Counter                               m_count;
 	Counter                               m_duration;
 	Peak                                  m_peak;
+	std::chrono::steady_clock::time_point m_start;
+};
+
+// TEMPORARY: duration-only accumulator for the KYTY_FPS_PROBE diagnostic.
+class ScopedDuration final {
+public:
+	explicit ScopedDuration(Counter duration) noexcept:
+	    m_duration(duration),
+	    m_start(Enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {}) {}
+	~ScopedDuration() {
+		if (m_start == std::chrono::steady_clock::time_point {} || !Enabled()) {
+			return;
+		}
+		Add(m_duration,
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                              std::chrono::steady_clock::now() - m_start)
+		                              .count()));
+	}
+	ScopedDuration(const ScopedDuration&)            = delete;
+	ScopedDuration& operator=(const ScopedDuration&) = delete;
+
+private:
+	Counter                               m_duration;
 	std::chrono::steady_clock::time_point m_start;
 };
 

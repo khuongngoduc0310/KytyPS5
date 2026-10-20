@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -671,6 +672,7 @@ void RenderExecutor::ResetBindings() {
 
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
+	Common::DebugCounters::ScopedDuration probe(Common::DebugCounters::Counter::ProbeMaterializeNs);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(!runtime);
 	const auto& program  = *runtime.program;

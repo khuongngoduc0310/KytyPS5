@@ -12,6 +12,9 @@ struct GraphicContext;
 // Called for each main-bus guest flip, with the guest's video-out size.
 void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) noexcept;
 
+// TEMPORARY: per-second counter dump for the KYTY_FPS_PROBE diagnostic.
+void PerformanceOverlayProbeIdle() noexcept;
+
 [[nodiscard]] bool PerformanceOverlayEnabled() noexcept;
 void               TogglePerformanceOverlay() noexcept;
 // Switches between the compact and the detailed panel, showing the panel if it was hidden.

@@ -567,6 +567,7 @@ void GuestGpu::ThreadRun(void* data) {
 }
 
 bool GuestGpu::Process(Submission& submission) {
+	Common::DebugCounters::ScopedDuration probe(Common::DebugCounters::Counter::ProbeProcessNs);
 	const bool first_slice = !submission.started;
 	auto&      cp          = GetProcessor(submission.queue_id);
 
