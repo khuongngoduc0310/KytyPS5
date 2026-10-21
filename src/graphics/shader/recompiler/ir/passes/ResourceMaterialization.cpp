@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -1555,10 +1556,16 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	SrtWalker clean(program, CleanRuntime(observed));
 	SrtWalker walker(program, observed,
 	                 capture_reads || program.requires_specialization_memory ? &clean : nullptr);
-	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
-		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
-		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
+	{
+		Common::DebugCounters::ScopedDuration probe(
+		    Common::DebugCounters::Counter::ProbeSrtWalkNs);
+		if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
+			return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
+			    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
+		}
 	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::ProbeSrtWalkReads,
+	                           program.srt_reads.size());
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	std::array<uint32_t, 3> workgroup_counts {};
 	if (runtime.indirect_args_address != 0u) {
@@ -1607,6 +1614,9 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		return SpecializationFail(fmt::format("indirect {} resource={} source={} candidates={}",
 		    kind, resource, source, candidates));
 	};
+	{
+	Common::DebugCounters::ScopedDuration descriptors_probe(
+	    Common::DebugCounters::Counter::ProbeDescNs);
 	snapshot.buffers.resize(program.info.buffers.size());
 	specialization.buffers.assign(program.info.buffers.size(), {});
 	for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {
@@ -1740,8 +1750,13 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			}
 		}
 	}
+	} // descriptor materialisation scope
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	return BuildResourceSpecialization(program, snapshot, specialization);
+	{
+		Common::DebugCounters::ScopedDuration probe(
+		    Common::DebugCounters::Counter::ProbeBuildNs);
+		return BuildResourceSpecialization(program, snapshot, specialization);
+	}
 }
 
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {

@@ -55,6 +55,10 @@ enum class Counter {
 	ProbePipelineNs,    // Graphics pipeline lookup or creation.
 	ProbeVertexNs,      // Vertex and index buffer acquisition.
 	ProbeTargetsNs,     // Render target and texture acquisition.
+	ProbeSrtWalkNs,     // RefreshFlatBuffer inside resource materialisation.
+	ProbeDescNs,        // Buffer/image/sampler descriptor materialisation.
+	ProbeBuildNs,       // BuildResourceSpecialization.
+	ProbeSrtWalkReads,  // Sum of srt_reads evaluated, to correlate walk cost.
 	// TEMPORARY: phase attribution for the KYTY_FPS_PROBE diagnostic.
 	ProbeSubmitNs,
 	ProbeFaultNs,

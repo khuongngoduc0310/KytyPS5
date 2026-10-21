@@ -84,6 +84,26 @@ With B enabled the emulator stalls at the same boot point every time - one ~1.2 
 
 Why it fails is not yet established. Two candidate explanations: the fast path skipped `MaterializeResources`' per-call reset of `resource_plan.selector_keys[].resolved`, or a descriptor genuinely still varied for a plan the predicate admitted. Either way the predicate was proven insufficient by execution, so the code is removed rather than left behind a flag.
 
+### Inside MaterializeResources
+
+Timers around `RefreshFlatBuffer`, the buffer/image/sampler descriptor loops and `BuildResourceSpecialization`. Heavy windows (8-17.8 k draws/s), 300 s run, no device loss, reached VS66/PS71/CS61/GS5:
+
+| section | ms/s | share of `prog` |
+|---|---|---|
+| `RefreshFlatBuffer` (SRT walk) | 202-323 | 57-65% |
+| descriptor materialisation | 21-39 | ~6% |
+| `BuildResourceSpecialization` | 1.2-2.3 | ~0.4% |
+| **unaccounted inside `prog`** | **~130-420** | **~25-35%** |
+
+`prog` itself is 352-645 ms/s in these windows.
+
+Two conclusions:
+
+1. The walk dominates the materialiser, and it is read-bound: 0.75-1.35 M `srt_reads`/s at 9-17.8 k draws/s, i.e. roughly 40 guest-memory reads per draw-stage at ~0.24 us each. That per-read cost is far above a 4-byte copy, which points at per-read bookkeeping rather than the copy - `SrtReadCapture::ReadOrdinary` appends to `capture.m_ranges` on every read, so a vector grow/allocation happens tens of times per draw-stage.
+2. Roughly a third of `prog` is **outside** the materialiser entirely: `prog` wraps `GetGraphicsPrograms`, which also runs `PrepareProgram` twice (global-mutex `ShaderGetMappedData`, `ShaderMapEntry`/`ShaderParams` copies, static vertex-input decode) and the `ProgramCache::Get` wrapper.
+
+Next single measurement, if wanted: split `prog` into `PrepareProgram` versus the cache-lookup remainder. Next cheap optimisation candidate: pre-size or dedupe `SrtReadCapture::m_ranges`.
+
 ### Fix A result - reverted as well
 
 Per-permutation memo key (hash of shader_base, indirect args, push-data cursor, workgroup counts, call-source revision and all user-data words), storing each permutation's own `ResourceSnapshot`, with the `selector_keys` reset reproduced on the hit path. Same binary, same command, 300 s each:
