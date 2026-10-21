@@ -90,6 +90,23 @@ void LogUnknownReleaseMemGcr(uint32_t gcr_cntl) {
 
 } // namespace
 
+// TEMPORARY GPU probe: traces depth-base register writes so it can be established whether the
+// occlusion cull draws lose their depth attachment because the guest clears it or because the
+// emulator does.
+static void DepthBaseProbeLog(const char* what, uint64_t base, uint32_t raw) {
+	static const bool probe_enabled = std::getenv("KYTY_OCCLUSION_PROBE") != nullptr;
+	if (!probe_enabled) {
+		return;
+	}
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1) >= 48u) {
+		return;
+	}
+	std::printf("[zbase] %s base=0x%llx raw=0x%x\n", what,
+	            static_cast<unsigned long long>(base), raw);
+	std::fflush(stdout);
+}
+
 static HW::BlendControl DecodeBlendControl(uint32_t value) {
 	HW::BlendControl r {};
 
@@ -3284,6 +3301,7 @@ void GraphicsInitJmpTablesCxIndirect() {
 		base &= 0xFFFFFF00000000FFull;
 		base |= static_cast<uint64_t>(value) << 8u;
 		cp.GetCtx().SetDepthZReadBase(base);
+		DepthBaseProbeLog("z-read-lo", base, value);
 	};
 
 	g_hw_ctx_indirect_func[Pm4::DB_Z_READ_BASE_HI] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
@@ -3291,6 +3309,7 @@ void GraphicsInitJmpTablesCxIndirect() {
 		base &= 0xFFFF00FFFFFFFFFFull;
 		base |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
 		cp.GetCtx().SetDepthZReadBase(base);
+		DepthBaseProbeLog("z-read-hi", base, value);
 	};
 
 	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_READ_BASE] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
@@ -3312,6 +3331,7 @@ void GraphicsInitJmpTablesCxIndirect() {
 		base &= 0xFFFFFF00000000FFull;
 		base |= static_cast<uint64_t>(value) << 8u;
 		cp.GetCtx().SetDepthZWriteBase(base);
+		DepthBaseProbeLog("z-write-lo", base, value);
 	};
 
 	g_hw_ctx_indirect_func[Pm4::DB_Z_WRITE_BASE_HI] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
@@ -3319,6 +3339,7 @@ void GraphicsInitJmpTablesCxIndirect() {
 		base &= 0xFFFF00FFFFFFFFFFull;
 		base |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
 		cp.GetCtx().SetDepthZWriteBase(base);
+		DepthBaseProbeLog("z-write-hi", base, value);
 	};
 
 	g_hw_ctx_indirect_func[Pm4::DB_STENCIL_WRITE_BASE] = [](KYTY_HW_CTX_INDIRECT_ARGS) {

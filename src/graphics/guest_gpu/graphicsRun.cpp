@@ -225,6 +225,20 @@ void CommandProcessor::Reset() {
 }
 
 void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operation) {
+	// TEMPORARY GPU probe: does a context clear/clear-push drop a depth attachment that was bound?
+	static const bool probe_enabled = std::getenv("KYTY_OCCLUSION_PROBE") != nullptr;
+	static std::atomic<uint32_t>    probe_logged {0};
+	if (probe_enabled && (operation == ContextStateOperation::Clear ||
+	                      operation == ContextStateOperation::PushClear) &&
+	    probe_logged.fetch_add(1) < 32u) {
+		const auto& before = m_ctx.GetDepthRenderTarget();
+		std::printf("[ctx] %s base_before r=0x%llx w=0x%llx z_enable=%u\n",
+		            operation == ContextStateOperation::Clear ? "clear" : "push-clear",
+		            static_cast<unsigned long long>(before.z_read_base_addr),
+		            static_cast<unsigned long long>(before.z_write_base_addr),
+		            m_ctx.GetDepthControl().z_enable ? 1u : 0u);
+		std::fflush(stdout);
+	}
 	switch (operation) {
 		case ContextStateOperation::Clear: m_ctx.Reset(); break;
 		case ContextStateOperation::Push:

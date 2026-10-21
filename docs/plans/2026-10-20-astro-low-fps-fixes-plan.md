@@ -214,6 +214,25 @@ Two conclusions:
 
 Caveat: the fps move is confounded by scene variance (dispatch rate differed between windows). The trustworthy result is `fault` ms/s, which is a direct measurement of the handler.
 
+### Depth-base trace - ambiguity remains, no fix attempted
+
+Traced `DB_Z_READ_BASE`/`DB_Z_WRITE_BASE` (lo and hi) writes and context-state operations.
+
+What the trace establishes:
+
+- The guest **does** bind real depth surfaces: `0x513560000` arrives through both the read and write base registers (20 nonzero writes in the 48-event window). The register decoding is therefore correct.
+- The guest **also** writes zero to those registers explicitly, in lo/hi quadruplets.
+- A context clear can arrive while a live base is bound: `[ctx] clear base_before r=0x513560000 w=0x513560000`.
+
+What it does not establish: the interleaving. The depth-base trace and the cull-draw observations are separate streams with no ordering marker, so two explanations remain open and I cannot separate them from this data:
+
+1. The guest genuinely unbinds depth for the cull pass (writes zero, draws, rebinds). Then the emulator is faithful and the queries are meaningless on hardware too, which would mean the occlusion theory is wrong.
+2. The guest relies on the depth binding surviving a context clear, which the emulator cannot reproduce because `Clear`/`PushClear` reset `m_depth_render_target`.
+
+No fix was attempted. Changing `Clear`/`PushClear` to preserve the depth attachment is a speculative semantic change to emulator state handling - the same class of change as fixes B and A, both of which produced deterministic device loss. It needs ordering evidence first.
+
+Cheapest next step: put a monotonic event counter in both traces (and in the cull-draw trace) so the sequence `bind -> clear -> cull draw` is directly visible. One run answers it.
+
 ### GPU-side root cause of the inert occlusion queries
 
 Probes: `KYTY_OCCLUSION_PROBE=1` logs the depth state of the draw between each `ZPASS_DONE` pair, and tallies every draw as depth-bound or depth-unbound.
