@@ -214,6 +214,18 @@ Two conclusions:
 
 Caveat: the fps move is confounded by scene variance (dispatch rate differed between windows). The trustworthy result is `fault` ms/s, which is a direct measurement of the handler.
 
+### Keep-depth-on-clear experiment - falsified
+
+Preserving `m_depth_render_target` across `ContextStateOperation::Clear` (`KYTY_KEEP_DEPTH_ON_CLEAR=1`) does not fix the cull draws. They still report:
+
+```
+cull-draw #0 slot=0 z_enable=1 ... depth_addrs r=0x0 w=0x0 htile=0x0
+```
+
+and the occlusion outcome is unchanged or worse: `zero 0`, `samples` 314-661 M/s, draws 14.9-26.5 k/s. The hypothesis that a context clear drops a live depth binding is therefore wrong for this path - the binding is already zero at the cull draw for another reason.
+
+Occlusion remains inert and its mechanism unresolved. The GPU-side work is parked here.
+
 ### Depth-base trace, sequenced - the ambiguity is resolved
 
 A monotonic event id on all three traces gives the ordering:

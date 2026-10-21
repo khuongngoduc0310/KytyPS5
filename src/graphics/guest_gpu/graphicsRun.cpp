@@ -246,6 +246,9 @@ void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operatio
 		std::fflush(stdout);
 	}
 	switch (operation) {
+		// Experiment (KYTY_KEEP_DEPTH_ON_CLEAR) tested and falsified: preserving the depth
+		// attachment across a context CLEAR does not restore it for the occlusion cull draws, which
+		// still observe z_read_base_addr == z_write_base_addr == 0. So the wipe is not the cause.
 		case ContextStateOperation::Clear: m_ctx.Reset(); break;
 		case ContextStateOperation::Push:
 			EXIT_IF(m_context_state_pushed);
