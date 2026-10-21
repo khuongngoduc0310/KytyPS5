@@ -307,6 +307,24 @@ Decision: the feature is **opt-in** (`--occlusion-queries`, default off). It is 
 
 Follow-up before this can help: establish why the proxy draws between the pair members pass depth (depth state, Hi-Z, or the wrong draw being bracketed). Until then occlusion cannot cull and the GPU-overdraw theory is unconfirmed; treat the Phase 2/3 CPU costs as the actionable levers.
 
+## Stage-loading stall - stack recovery dead-ends
+
+Attempted to recover the guest call path from the parked threads by dumping raw stack windows (1 KB, then 4 KB) and validating candidates offline with capstone: a word counts as a return address only if it lands in an executable segment and the bytes immediately before it decode as a `call` ending exactly there.
+
+Result: across 4 KB of `RoomLoad_ATQT`'s stack there are only five words in the eboot range, and **none validates as a call target**:
+
+```
+[+0x1f0] 0x900011dd1 (vaddr 0x11dd1) call=False
+[+0x210] 0x900011981 (vaddr 0x11981) call=False
+[+0x260] 0x9000117a9 (vaddr 0x117a9) call=False
+[+0x270] 0x9000010bc (vaddr 0x10bc)  call=False
+[+0x9f0] 0x908cff220 (vaddr 0x8cff220) call=False
+```
+
+The earlier reading of these as a guest call chain was wrong twice over: they are data pointers, and the vaddrs below 0x37050 are zero-filled padding in the image anyway (eboot code starts at ~0x37050). Every other frame on those stacks is host-side (`0x7ffa...`, `0x1403...`).
+
+Conclusion: stack scanning cannot recover guest frames for a thread parked inside an emulated libkernel wait, so the wait helper cannot be named this way. The next technique would have to capture the guest return address at the guest-to-host import boundary instead (i.e. instrument the generated import stub, which still has the guest return address on the stack at entry), not scan the stack afterwards.
+
 ## Stage-loading stall - guest thread dump
 
 Added `LibKernel::DumpGuestThreadStacks`, enabled with `KYTY_THREAD_DUMP=1`: every 30 s it suspends each guest host thread, reads RIP/RSP/RBP from the host context, and scans its native stack for words that look like guest code addresses (0x8_00000000..0x10_000000000), which are the guest return addresses.

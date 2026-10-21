@@ -688,26 +688,21 @@ void PthreadPool::DumpStates(const char* tag) {
 		// (addresses in the 0x9... guest range) can be recovered even when the thread is parked
 		// inside a host wait.
 		if (rsp >= 0x10000u && (rsp & 0x7u) == 0) {
-			// Only report words that look like guest code addresses: those are the guest return
-			// addresses, and they name the guest call path even when the thread is parked inside a
-			// host wait.
-			const auto*       words = reinterpret_cast<const uint64_t*>(rsp);
-			char              line[512];
-			int               used  = std::snprintf(line, sizeof(line), "[threads]     guest:");
-			int               shown = 0;
-			constexpr uint64_t kGuestLow  = 0x800000000ull;
-			constexpr uint64_t kGuestHigh = 0x1000000000ull;
-			for (int i = 0; i < 1024 && shown < 10 && used < static_cast<int>(sizeof(line)) - 24;
-			     i++) {
-				const auto w = words[i];
-				if (w < kGuestLow || w >= kGuestHigh) {
-					continue;
+			// Raw stack window. Return addresses are recovered offline (a word is only a real
+			// return address if the bytes just before it decode as a call), because filtering for
+			// "looks like a guest address" also matches data pointers.
+			const auto* words = reinterpret_cast<const uint64_t*>(rsp);
+			for (int row = 0; row < 8; row++) {
+				char line[512];
+				int  used = std::snprintf(line, sizeof(line), "[threads]     rsp%c%04x:", 43,
+				                          row * 16 * 8);
+				for (int i = 0; i < 16; i++) {
+					used += std::snprintf(line + used, sizeof(line) - static_cast<size_t>(used),
+					                      " %llx",
+					                      static_cast<unsigned long long>(words[row * 16 + i]));
 				}
-				used += std::snprintf(line + used, sizeof(line) - static_cast<size_t>(used),
-				                      " %llx", static_cast<unsigned long long>(w));
-				shown++;
+				LOGF("%s%c", line, 10);
 			}
-			LOGF("%s%c", line, 10);
 		}
 	}
 }
