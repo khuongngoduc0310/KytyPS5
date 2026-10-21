@@ -2733,6 +2733,8 @@ int KYTY_SYSV_ABI PthreadCondattrSetclock(PthreadCondattr* attr, KernelClockid c
 int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond) {
 	// PRINT_NAME();
 
+	// TEMPORARY: pairs with the cond-wait trace.
+
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
 	cond = static_cast<PthreadCond*>(
@@ -2823,6 +2825,8 @@ int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr
 int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond) {
 	// PRINT_NAME();
 
+	// TEMPORARY: pairs with the cond-wait trace.
+
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
 	cond = static_cast<PthreadCond*>(
@@ -2878,6 +2882,9 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex,
 
 	auto* cond_value  = *cond;
 	auto* mutex_value = *mutex;
+
+	// TEMPORARY: identify the condvar a guest thread parks on, so an unsignalled wait can be
+	// matched against every signal/broadcast in the log.
 
 	if (mutex_value->owner != g_pthread_self) {
 		return KERNEL_ERROR_EPERM;

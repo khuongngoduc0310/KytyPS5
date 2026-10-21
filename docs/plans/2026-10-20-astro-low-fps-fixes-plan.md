@@ -307,6 +307,23 @@ Decision: the feature is **opt-in** (`--occlusion-queries`, default off). It is 
 
 Follow-up before this can help: establish why the proxy draws between the pair members pass depth (depth state, Hi-Z, or the wrong draw being bracketed). Until then occlusion cannot cull and the GPU-overdraw theory is unconfirmed; treat the Phase 2/3 CPU costs as the actionable levers.
 
+## Stage-loading stall - state of the investigation
+
+With the file-read fix in place the guest no longer crashes at stage entry, but the stage never finishes loading: the loading animation keeps rendering at ~20 fps and controller/audio keep working, indefinitely.
+
+Evidence gathered from a 420 s run with `--printf-direction File`:
+
+- The loader thread (`tid 42`) polls `PthreadCondWait` about 30 times per second and never stops.
+- Only eight guest threads ever log a name; `tid 3` stops at 1:06, `tid 23` at 1:16, `tid 50` at 1:32, and from then on only `tid 42` logs.
+- Right before parking, `tid 50` creates a batch of mutexes/condvars/rwlock and several threads at 1:31.9, then waits.
+- Asset loading is genuinely progressing up to that point: large `.gnfp` reads complete (5.7 MB, 2.8 MB, 1.5 MB all full size), and GPU end-of-pipe events are both waited for and received.
+- No unimplemented API, no unresolved import, no error or assertion is logged at any point.
+- `--playgo-hack` activates (`chunks = 1000`) but changes nothing, so the missing `sce_sys/playgo-chunk.dat` (this dump has neither that file nor `playgo-chunkdefs.xml`) is not the blocker.
+
+Not yet determined: which condvar `tid 42` waits on and whether anything ever signals it. An instrumentation attempt to log the condvar address landed in `PthreadCondTimedwait` instead of `PthreadCondWait` and produced nothing; it has been removed rather than left in the wrong function.
+
+Next step that would actually settle it: either log the condvar address inside `PthreadCondWait` itself and match it against every signal/broadcast, or add a "dump all guest threads" facility that reports each thread's RIP/RSP so the blocked guest stacks can be read directly. More blind single-variable changes are not justified.
+
 ## Stage-loading crash - root cause and fix
 
 Entering the hub crash-site stage killed the emulator. Guest thread `RoomLoad_ATQT` / `ProductNextLoad_ATQT` dereferenced null (`0x28`, then `0xffffffffffffffff`), after the game logged:
