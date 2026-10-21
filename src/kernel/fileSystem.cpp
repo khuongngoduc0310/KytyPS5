@@ -716,8 +716,8 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 		return KERNEL_ERROR_EIO;
 	}
 
-	LOGF("\tRead %u bytes (asked %zu, pos %" PRId64 ", size %" PRId64 ") from: %s\n",
-	     bytes_read, nbytes, pos, file_size, Common::PathToString(file->real_name).c_str());
+	LOGF("	Read %u bytes from: %s\n", bytes_read,
+	     Common::PathToString(file->real_name).c_str());
 
 	return bytes_read;
 }
@@ -937,7 +937,7 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 		const auto count = static_cast<uint32_t>(std::min<uint64_t>(buffer.iov_len, remaining));
 		Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buffer.iov_base), count);
 		uint32_t bytes = 0;
-		file->f.Read(buffer.iov_base, count, &bytes);
+		ReadIntoGuestMemory(file->f, buffer.iov_base, count, &bytes);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes);
 		bytes_read += bytes;
 		remaining -= bytes;

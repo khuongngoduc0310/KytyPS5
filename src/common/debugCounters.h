@@ -44,30 +44,6 @@ enum class Counter {
 	GuestFileReadBytes,
 	GuestFileWriteBytes,
 	AudioUnderruns,
-	OcclusionResolved,  // Real host sample counts published for a ZPASS_DONE pair.
-	OcclusionFallbacks, // Pairs that fell back to always-visible.
-	OcclusionZero,      // Resolved pairs reporting zero depth-test samples (fully occluded).
-	OcclusionSamples,   // Sum of resolved sample counts, to judge whether counts are meaningful.
-	FaultRangeResolved, // Faults resolved against the whole containing cached buffer.
-	FaultByteFallback,  // Faults that had no bounded containing buffer and stayed byte-scoped.
-	// TEMPORARY attribution timers for the per-draw CPU path.
-	ProbeProgramsNs,    // Shader program selection / resource materialization.
-	ProbePipelineNs,    // Graphics pipeline lookup or creation.
-	ProbeVertexNs,      // Vertex and index buffer acquisition.
-	ProbeTargetsNs,     // Render target and texture acquisition.
-	ProbeSrtWalkNs,     // RefreshFlatBuffer inside resource materialisation.
-	ProbeDescNs,        // Buffer/image/sampler descriptor materialisation.
-	ProbeBuildNs,       // BuildResourceSpecialization.
-	ProbeSrtWalkReads,  // Sum of srt_reads evaluated, to correlate walk cost.
-	ProbePrepareNs,     // PrepareProgram (shader map lookup and state decode).
-	ProbeCacheGetNs,    // ProgramCache::Get wrapper around the materialiser.
-	DepthBoundDraws,    // Draws resolved with a real depth attachment.
-	DepthUnboundDraws,  // Draws with depth test enabled but no bound depth attachment.
-	// TEMPORARY: phase attribution for the KYTY_FPS_PROBE diagnostic.
-	ProbeSubmitNs,
-	ProbeFaultNs,
-	ProbeProcessNs,
-	ProbeMaterializeNs,
 	Count
 };
 
@@ -125,29 +101,6 @@ private:
 	Counter                               m_count;
 	Counter                               m_duration;
 	Peak                                  m_peak;
-	std::chrono::steady_clock::time_point m_start;
-};
-
-// TEMPORARY: duration-only accumulator for the KYTY_FPS_PROBE diagnostic.
-class ScopedDuration final {
-public:
-	explicit ScopedDuration(Counter duration) noexcept:
-	    m_duration(duration),
-	    m_start(Enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {}) {}
-	~ScopedDuration() {
-		if (m_start == std::chrono::steady_clock::time_point {} || !Enabled()) {
-			return;
-		}
-		Add(m_duration,
-		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-		                              std::chrono::steady_clock::now() - m_start)
-		                              .count()));
-	}
-	ScopedDuration(const ScopedDuration&)            = delete;
-	ScopedDuration& operator=(const ScopedDuration&) = delete;
-
-private:
-	Counter                               m_duration;
 	std::chrono::steady_clock::time_point m_start;
 };
 

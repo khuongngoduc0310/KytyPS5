@@ -145,8 +145,6 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	auto [range_addr, range_size] = m_buffer_cache.FindRegisteredRange(fault_vaddr);
 	const bool range_ok = range_size != 0 && range_size <= max_fault_range;
 
-	Common::DebugCounters::Add(range_ok ? Common::DebugCounters::Counter::FaultRangeResolved
-	                                    : Common::DebugCounters::Counter::FaultByteFallback);
 
 	if (access == PageFaultAccess::Write) {
 		if (range_ok) {

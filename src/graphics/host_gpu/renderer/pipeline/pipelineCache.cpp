@@ -679,8 +679,6 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	{
-		Common::DebugCounters::ScopedDuration probe(
-		    Common::DebugCounters::Counter::ProbePrepareNs);
 		if (tess_active) {
 			vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
 		} else {
@@ -720,8 +718,6 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	ShaderParams pixel_params;
 	if (pixel_active) {
 		{
-			Common::DebugCounters::ScopedDuration probe(
-			    Common::DebugCounters::Counter::ProbePrepareNs);
 			pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
 		}
 		pixel_info.object_primitive_id = object_primitive_id;
@@ -816,8 +812,6 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	    mesh_active, object_primitive_id, last_stage.user_clip_planes);
 	GraphicsPrograms result;
 	{
-		Common::DebugCounters::ScopedDuration probe(
-		    Common::DebugCounters::Counter::ProbeCacheGetNs);
 		if (pixel_active) {
 			result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
 		}

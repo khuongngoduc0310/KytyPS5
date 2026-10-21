@@ -588,117 +588,6 @@ void DrawMemoryAndIo(const Snapshot& shown) {
 
 } // namespace
 
-namespace {
-
-// TEMPORARY diagnostic: KYTY_FPS_PROBE=1 prints one line per second with the presented frame rate
-// and the per-second counter deltas, so a low-FPS report can be attributed to GPU waits, shader
-// compilation, pipeline creation or presentation. Idle ticks come from the present thread so boot
-// (no flips yet) is covered too. Remove with the calls in RecordFlip and videoOut PresentThread.
-struct FpsProbe {
-	bool              inited = false;
-	bool              active = false;
-	Clock::time_point window = {};
-	uint64_t          flips  = 0;
-	double            sum_ms = 0.0;
-	double            max_ms = 0.0;
-	uint64_t          previous[static_cast<int>(Common::DebugCounters::Counter::Count)] {};
-};
-
-FpsProbe& Probe() {
-	static FpsProbe probe;
-	if (!probe.inited) {
-		probe.inited = true;
-		probe.active = std::getenv("KYTY_FPS_PROBE") != nullptr;
-	}
-	return probe;
-}
-
-void FpsProbeStep(Clock::time_point now, bool flip, double interval_ms) {
-	auto& probe = Probe();
-	if (!probe.active) {
-		return;
-	}
-
-	using Common::DebugCounters::Counter;
-
-	if (probe.window == Clock::time_point {}) {
-		probe.window = now;
-		for (int i = 0; i < static_cast<int>(Counter::Count); i++) {
-			probe.previous[i] = Common::DebugCounters::Get(static_cast<Counter>(i));
-		}
-		return;
-	}
-
-	if (flip) {
-		probe.flips++;
-		probe.sum_ms += interval_ms;
-		probe.max_ms = std::max(probe.max_ms, interval_ms);
-	}
-
-	const double elapsed = std::chrono::duration<double>(now - probe.window).count();
-	if (elapsed < 1.0) {
-		return;
-	}
-
-	const auto delta = [&probe](Counter counter) -> uint64_t {
-		const auto index      = static_cast<int>(counter);
-		const auto total      = Common::DebugCounters::Get(counter);
-		const auto value      = total - probe.previous[index];
-		probe.previous[index] = total;
-		return value;
-	};
-
-	const auto calls    = probe.flips;
-	const auto avg_ms   = calls != 0 ? probe.sum_ms / static_cast<double>(calls) : 0.0;
-	const auto gpu_wait = static_cast<double>(delta(Counter::GpuWaitNs)) / 1e6;
-	const auto shader   = static_cast<double>(delta(Counter::ShaderCompileNs)) / 1e6;
-	const auto pipeline = static_cast<double>(delta(Counter::PipelineCreateNs)) / 1e6;
-
-	const auto msv = [&delta](Counter c) {
-		return static_cast<double>(delta(c)) / 1e6;
-	};
-	std::printf("[fps] %6.1f fps | frame avg %6.2f ms max %7.2f ms | gpu-wait %6.1f | process "
-	            "%6.1f | submit %6.1f | bind %6.1f | fault %6.1f  (ms/s) | shader %6.1f pipeline "
-	            "%6.1f | draws %llu disp %llu submits %llu | faults %llu late-vblank %llu drop "
-	            "%llu | occl ok %llu fb %llu zero %llu samples %llu | frange %llu fbyte %llu | "
-	            "prog %6.1f pipe %6.1f vtx %6.1f tgt %6.1f | srt %6.1f desc %6.1f build %6.1f "
-	            "reads %llu || prep %6.1f cget %6.1f | zbound %llu zunbound %llu%s",
-	            static_cast<double>(calls) / elapsed, avg_ms, probe.max_ms, gpu_wait,
-	            msv(Counter::ProbeProcessNs), msv(Counter::ProbeSubmitNs),
-	            msv(Counter::ProbeMaterializeNs), msv(Counter::ProbeFaultNs), shader, pipeline,
-	            static_cast<unsigned long long>(delta(Counter::Draws)),
-	            static_cast<unsigned long long>(delta(Counter::Dispatches)),
-	            static_cast<unsigned long long>(delta(Counter::QueueSubmits)),
-	            static_cast<unsigned long long>(delta(Counter::GpuFaults)),
-	            static_cast<unsigned long long>(delta(Counter::LateVblanks)),
-	            static_cast<unsigned long long>(delta(Counter::DroppedPresents)),
-	            static_cast<unsigned long long>(delta(Counter::OcclusionResolved)),
-	            static_cast<unsigned long long>(delta(Counter::OcclusionFallbacks)),
-	            static_cast<unsigned long long>(delta(Counter::OcclusionZero)),
-	            static_cast<unsigned long long>(delta(Counter::OcclusionSamples)),
-	            static_cast<unsigned long long>(delta(Counter::FaultRangeResolved)),
-	            static_cast<unsigned long long>(delta(Counter::FaultByteFallback)),
-	            msv(Counter::ProbeProgramsNs), msv(Counter::ProbePipelineNs),
-	            msv(Counter::ProbeVertexNs), msv(Counter::ProbeTargetsNs),
-	            msv(Counter::ProbeSrtWalkNs), msv(Counter::ProbeDescNs),
-	            msv(Counter::ProbeBuildNs),
-	            static_cast<unsigned long long>(delta(Counter::ProbeSrtWalkReads)),
-	            msv(Counter::ProbePrepareNs), msv(Counter::ProbeCacheGetNs),
-	            static_cast<unsigned long long>(delta(Counter::DepthBoundDraws)),
-	            static_cast<unsigned long long>(delta(Counter::DepthUnboundDraws)), "\n");
-	std::fflush(stdout);
-
-	probe.window = now;
-	probe.flips  = 0;
-	probe.sum_ms = 0.0;
-	probe.max_ms = 0.0;
-}
-
-} // namespace
-
-void PerformanceOverlayProbeIdle() noexcept {
-	FpsProbeStep(Clock::now(), false, 0.0);
-}
 
 void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) noexcept {
 	if (!Common::DebugCounters::Enabled()) {
@@ -716,7 +605,6 @@ void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) n
 		frames.next                      = (frames.next + 1) % FRAME_HISTORY;
 		frames.count                     = std::min(frames.count + 1, FRAME_HISTORY);
 		frames.max_ms                    = std::max(frames.max_ms, ms);
-		FpsProbeStep(now, true, static_cast<double>(ms));
 	}
 	frames.last_flip    = now;
 	frames.guest_width  = guest_width;

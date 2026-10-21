@@ -591,7 +591,6 @@ void GuestGpu::ThreadRun(void* data) {
 }
 
 bool GuestGpu::Process(Submission& submission) {
-	Common::DebugCounters::ScopedDuration probe(Common::DebugCounters::Counter::ProbeProcessNs);
 	const bool first_slice = !submission.started;
 	auto&      cp          = GetProcessor(submission.queue_id);
 
@@ -924,19 +923,6 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 			            static_cast<unsigned long long>(rt.htile_data_base_addr),
 			            args.index_count, args.instance_count);
 			std::fflush(stdout);
-		}
-	}
-	{
-		// TEMPORARY GPU probe: how many draws run with depth enabled but nothing bound to test
-		// against. A high share would mean no depth testing at all, which is both a correctness and
-		// a fill-rate problem.
-		static const bool probe_enabled = std::getenv("KYTY_OCCLUSION_PROBE") != nullptr;
-		if (probe_enabled) {
-			const auto& dc       = m_ctx.GetDepthControl();
-			const auto& z        = m_ctx.GetDepthRenderTarget();
-			const bool  unbound  = dc.z_enable && z.z_read_base_addr == 0 && z.z_write_base_addr == 0;
-			Common::DebugCounters::Add(unbound ? Common::DebugCounters::Counter::DepthUnboundDraws
-			                                   : Common::DebugCounters::Counter::DepthBoundDraws);
 		}
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
@@ -1510,21 +1496,12 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 					    uint64_t   count = 0;
 					    const auto ready = 1ull << 63u;
 					    if (render_context.OcclusionResolve(slot, count)) {
-						    Common::DebugCounters::Add(
-						        Common::DebugCounters::Counter::OcclusionResolved);
 						    // Only remember it; the value published this cycle is intentionally the previous
 						    // one, so the guest never waits on a result.
 						    m_occlusion_last[slot] = count & (ready - 1u);
 						    if ((count & (ready - 1u)) == 0u) {
-							    Common::DebugCounters::Add(
-							        Common::DebugCounters::Counter::OcclusionZero);
 						    }
-						    Common::DebugCounters::Add(
-						        Common::DebugCounters::Counter::OcclusionSamples,
-						        count & (ready - 1u));
 					    } else {
-						    Common::DebugCounters::Add(
-						        Common::DebugCounters::Counter::OcclusionFallbacks);
 						    m_occlusion_last[slot] = visible;
 						    render_context.OcclusionReset(slot);
 					    }

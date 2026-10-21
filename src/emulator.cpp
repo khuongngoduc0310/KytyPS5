@@ -187,12 +187,6 @@ void Run(const RunOptions& options) {
 	Libs::LibKernel::FileSystem::Mount(options.app0_dir, "/app0");
 	Libs::LibKernel::FileSystem::Mount(options.app0_dir, "/hostapp");
 
-	// TEMPORARY: KYTY_FPS_PROBE=1 enables the per-second frame/counter probe in
-	// performanceOverlay.cpp. Remove with that probe.
-	if (std::getenv("KYTY_FPS_PROBE") != nullptr) {
-		Common::DebugCounters::SetEnabled(true);
-	}
-
 	MountSandboxDirs();
 
 	Loader::AddContentLoad(options.addcont_dir, title_id);

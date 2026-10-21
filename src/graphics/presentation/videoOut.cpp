@@ -955,7 +955,6 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		if (total_wait < 0) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::LateVblanks);
 		}
-		Graphics::PerformanceOverlayProbeIdle();
 	}
 	if (m_presenter.IsDeviceLost()) {
 		m_flip_queue.CancelDeviceLoss();
