@@ -84,6 +84,29 @@ With B enabled the emulator stalls at the same boot point every time - one ~1.2 
 
 Why it fails is not yet established. Two candidate explanations: the fast path skipped `MaterializeResources`' per-call reset of `resource_plan.selector_keys[].resolved`, or a descriptor genuinely still varied for a plan the predicate admitted. Either way the predicate was proven insufficient by execution, so the code is removed rather than left behind a flag.
 
+### Step 1 (range bookkeeping) - no measurable effect; Step 2 accounting closed
+
+Step 1 collapsed consecutive duplicate ranges and reserved the range vector once per materialisation. Measured before/after at equal draw rates:
+
+| | `srt` ms/s | reads/s |
+|---|---|---|
+| before | 259-324 | 1.11-1.35 M |
+| after | 262-322 | 1.11-1.26 M |
+
+No change. The walk almost never re-reads the same word consecutively, and the vector's capacity was already amortised by the first frames. Kept because it is neutral and shrinks the recorded-range set that later overlap analysis consumes, but it is not a win and should not be counted as one.
+
+Step 2 split `prog` into `PrepareProgram` and the cache-lookup wrapper. The accounting now closes:
+
+`prog` 354-538 ms/s at 15-16.8 k draws/s = `PrepareProgram` 30-35 + cache lookup 322-354, and the cache lookup is `srt` walk 262-322 + descriptors 34-40 + build 2.
+
+So at high draw rates the split is: **SRT walk 74-83%, descriptor materialisation ~10%, `PrepareProgram` ~9%, `BuildResourceSpecialization` ~0.5%**.
+
+Budget for the same windows (`process` ~1000 ms/s, one saturated thread):
+
+`gpu-wait` 719-858, `prog` 354-538 (containing the walk, which itself provokes most of `fault` 183-392 because the walk reads GPU-tracked guest memory), `submit` 72-109.
+
+Conclusion: the emulator is now GPU-bound (`gpu-wait` dominates), and the remaining CPU cost is the SRT walk's own evaluation work per read (~0.25 us), not allocation. Cutting it any further means either reworking upstream's walker or the caching route that already failed twice, so CPU-side work should stop here.
+
 ### Inside MaterializeResources
 
 Timers around `RefreshFlatBuffer`, the buffer/image/sampler descriptor loops and `BuildResourceSpecialization`. Heavy windows (8-17.8 k draws/s), 300 s run, no device loss, reached VS66/PS71/CS61/GS5:

@@ -59,6 +59,8 @@ enum class Counter {
 	ProbeDescNs,        // Buffer/image/sampler descriptor materialisation.
 	ProbeBuildNs,       // BuildResourceSpecialization.
 	ProbeSrtWalkReads,  // Sum of srt_reads evaluated, to correlate walk cost.
+	ProbePrepareNs,     // PrepareProgram (shader map lookup and state decode).
+	ProbeCacheGetNs,    // ProgramCache::Get wrapper around the materialiser.
 	// TEMPORARY: phase attribution for the KYTY_FPS_PROBE diagnostic.
 	ProbeSubmitNs,
 	ProbeFaultNs,

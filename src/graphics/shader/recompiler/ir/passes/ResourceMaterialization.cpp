@@ -1551,6 +1551,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	     std::ranges::any_of(program.descriptor_sources, uses_workgroup_count));
 	auto& reads = snapshot.specialization_reads;
 	reads = program.source_reads;
+	// One reservation instead of a growth step per recorded read (tens per draw-stage).
+	// srt_reads are the upper bound for the walk; descriptor evaluation adds a few more.
+	reads.reserve(reads.size() + program.srt_reads.size() +
+	              program.descriptor_sources.size() + 8u);
 	SrtReadCapture capture {runtime, reads};
 	auto observed = capture_reads ? capture.ObservedRuntime() : runtime;
 	SrtWalker clean(program, CleanRuntime(observed));

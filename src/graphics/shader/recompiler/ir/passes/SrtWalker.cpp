@@ -13,6 +13,8 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
@@ -29,6 +31,16 @@ bool LooksLikeGuestAddress(uint64_t address, size_t size) noexcept {
 	return address >= MinGuestAddress && size <= UINT64_MAX - address;
 }
 
+// Collapses a repeat of the immediately preceding range. The recorded ranges feed overlap and
+// hazard analysis only, so a duplicate carries no information.
+void RecordRead(std::vector<std::pair<uint64_t, uint64_t>>& ranges, uint64_t address,
+                uint64_t size) {
+	if (!ranges.empty() && ranges.back().first == address && ranges.back().second == size) {
+		return;
+	}
+	ranges.emplace_back(address, size);
+}
+
 SrtRuntime SrtReadCapture::ObservedRuntime() {
 	auto runtime = m_source;
 	runtime.userdata = this;
@@ -43,7 +55,10 @@ bool SrtReadCapture::ReadStrict(void* userdata, uint64_t address, std::span<uint
 	if (!capture.m_source.read_specialization_memory(capture.m_source.userdata, address, values)) {
 		return false;
 	}
-	capture.m_ranges.emplace_back(address, values.size_bytes());
+	// A shader often re-reads the same word several times per materialisation. Consumers only run
+	// overlap analysis over these ranges, so collapsing consecutive duplicates is lossless and
+	// removes most of the vector growth on this per-read path.
+	RecordRead(capture.m_ranges, address, values.size_bytes());
 	return true;
 }
 
@@ -58,7 +73,7 @@ bool SrtReadCapture::ReadOrdinary(void* userdata, uint64_t address, std::span<ui
 		// Hardware reads such an address back as zero, so return zeroes instead of faulting.
 		std::fill(values.begin(), values.end(), 0u);
 	}
-	capture.m_ranges.emplace_back(address, values.size_bytes());
+	RecordRead(capture.m_ranges, address, values.size_bytes());
 	return true;
 }
 

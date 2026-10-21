@@ -678,10 +678,14 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info) {
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
-	if (tess_active) {
-		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
-	} else {
-		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
+	{
+		Common::DebugCounters::ScopedDuration probe(
+		    Common::DebugCounters::Counter::ProbePrepareNs);
+		if (tess_active) {
+			vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
+		} else {
+			vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
+		}
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
 	const bool object_primitive_id = context.HasObjectPrimitiveIdOutput();
@@ -715,7 +719,11 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	}
 	ShaderParams pixel_params;
 	if (pixel_active) {
-		pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		{
+			Common::DebugCounters::ScopedDuration probe(
+			    Common::DebugCounters::Counter::ProbePrepareNs);
+			pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		}
 		pixel_info.object_primitive_id = object_primitive_id;
 		for (uint32_t export_index = 0; export_index < 8u; export_index++) {
 			const auto slot = ShaderPixelExportTarget(pixel_info.target_shader_mask, export_index);
@@ -806,12 +814,17 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	}
 	uint32_t push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(
 	    mesh_active, object_primitive_id, last_stage.user_clip_planes);
-	GraphicsPrograms  result;
-	if (pixel_active) {
-		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
-	}
-	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
-		result.vertex[i] = m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
+	GraphicsPrograms result;
+	{
+		Common::DebugCounters::ScopedDuration probe(
+		    Common::DebugCounters::Counter::ProbeCacheGetNs);
+		if (pixel_active) {
+			result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
+		}
+		for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
+			result.vertex[i] =
+			    m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
+		}
 	}
 	return result;
 }
