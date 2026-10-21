@@ -684,10 +684,6 @@ struct ResourcePlan {
 	bool                                requires_specialization_memory = false;
 	std::vector<std::pair<uint64_t, uint64_t>> source_reads;
 	bool                                capture_specialization_reads = false;
-	// True when any instruction can read the draw's user data. Conservative: a single
-	// GetUserData anywhere in the plan disqualifies the static-specialization fast path,
-	// because descriptor values may then depend on per-draw user data.
-	bool                                reads_user_data = false;
 	bool                                srt_plan_complete          = false;
 	bool                                resource_tracking_complete = false;
 	ShaderInfo                          info;

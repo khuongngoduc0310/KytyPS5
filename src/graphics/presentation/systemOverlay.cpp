@@ -627,6 +627,11 @@ PFN_vkVoidFunction LoadVulkanFunction(const char* name, void* user_data) {
 }
 
 void CheckVulkanResult(VkResult result) {
+	// Device loss is already terminal and reported by the scheduler. ImGui's backend still runs
+	// teardown calls afterwards, and turning one of those into an assert hides the real cause.
+	if (result == VK_ERROR_DEVICE_LOST) {
+		return;
+	}
 	EXIT_IF(result != VK_SUCCESS);
 }
 

@@ -68,23 +68,37 @@ Measured with `KYTY_PM4_PROBE=1`, which logs every `EVENT_WRITE` type plus the d
 - **The current synthetic write does not match this layout.** It writes 16 slots at 16-byte stride starting at `event_address`, whereas the guest uses one u64 per event at that event's own address with an 8-byte begin/end offset. Any real implementation must write a single u64 per `ZPASS_DONE`, not a 16-slot fan-out.
 - Open question carried into Phase 1: which member of the pair the guest polls for `ready_bit`. The end slot is the natural answer, but it must be verified before writing the result (see Phase 1 step 6).
 
-### Fix B result - static-specialization fast path, plus a regression I introduced
+### Fix B result - reverted: it device-lost deterministically
 
-Two changes shipped together; the measurement below does not separate them.
+Fix B (retain the first permutation of a "static" plan and reuse it) was implemented, measured, and then **reverted**. It is unsound.
 
-1. **Removed my own hot-path regression.** The Phase 1 SRT guard called `HostMemoryRangeIsReadable` from `SrtReadCapture::ReadOrdinary`, which is the same per-read path resource materialisation uses. That helper does a `VirtualQuery` on Windows and opens `/proc/self/maps` on Linux - per SRT read, per draw, per stage. Replaced with a single integer compare against a 4 GiB guest-address floor (`LooksLikeGuestAddress`), which still catches the non-guest `0x18` case.
-2. **Fix B: static-specialization fast path.** `SourceEntry::StaticPlan()` admits plans with no SRT reads, no specialization-read capture, no specialization-memory requirement and **no `GetUserData` anywhere**; the first permutation and its snapshot are retained and reused. The new `ResourcePlan::reads_user_data` flag is set conservatively at extraction, because `srt_reads.empty()` alone was **not** sufficient: descriptor values can resolve through `GetUserData`, which is draw-dependent.
+Evidence, all runs same build, same command:
 
-Measured, light scene (47-53 fps, 0.6-0.8 k draws/s):
+| build | last shader counts reached | max draws/s | device lost |
+|---|---|---|---|
+| pre-B (attribution run) | VS57 / PS64 / CS67 / GS5 | 5314 | 0 |
+| B on | VS22 / PS36 / CS48 / GS4 | 1099-1230 | 2, every one of 4 runs |
+| B off (kill switch) | VS96 / PS94 / CS86 / GS7 | 17871 | 0 |
 
-| counter | before | after |
-|---|---|---|
-| `prog` ms/s | 155-161 | **7.8-10.1** |
-| fps | ~50 | 47-53 |
+With B enabled the emulator stalls at the same boot point every time - one ~1.2 s frame with a shader/pipeline compile burst, then `Vulkan device lost: operation=semaphore-wait` - and never progresses past `CS48`. With B disabled it sails past and reaches scenes 3.4x heavier than the pre-B build ever did.
 
-At 50 fps `gpu-wait` is 884-950 ms/s, i.e. the emulator is GPU-bound again in this scene, which is the desired end state.
+Why it fails is not yet established. Two candidate explanations: the fast path skipped `MaterializeResources`' per-call reset of `resource_plan.selector_keys[].resolved`, or a descriptor genuinely still varied for a plan the predicate admitted. Either way the predicate was proven insufficient by execution, so the code is removed rather than left behind a flag.
 
-Not yet verified: the heavy gameplay scene (2.9 k draws/s) was not reached in this run's sampled window, so the per-draw win there is inferred rather than measured.
+### The surviving win - the memory-probe regression fix
+
+The other half of that change was sound and is kept: `SrtReadCapture::ReadOrdinary` called `HostMemoryRangeIsReadable` per SRT read, and that helper does a `VirtualQuery` on Windows and opens `/proc/self/maps` on Linux. Resource materialisation runs per draw and per stage, so the probe sat on a very hot path. It is replaced by a single integer compare against a 4 GiB guest-address floor, which still rejects the non-guest `0x18` case that motivated the guard.
+
+Measured on the heavy scene, safe build:
+
+| build | draws/s | `prog` ms/s | prog per draw | fps |
+|---|---|---|---|---|
+| pre-fix | 2224-3553 | 652-783 | ~0.26 ms | 11.8-27.5 |
+| fixed | 4900-9800 | 186-293 | ~0.037 ms | 19-41 |
+| fixed | 14000-15764 | ~400-500 | ~0.03 ms | 22-27 |
+
+Roughly 7x cheaper per draw, and the emulator now reaches 17.9 k draws/s where the pre-fix build peaked at 5.3 k. The 20x `prog` reduction seen in the light scene earlier was therefore mostly this, not B.
+
+Also fixed in the same session: ImGui's `CheckVulkanResult` asserted during teardown after a device loss, converting a diagnosable failure into a fatal one. It now ignores `VK_ERROR_DEVICE_LOST`.
 
 ### Root cause of the program-selection cost
 
