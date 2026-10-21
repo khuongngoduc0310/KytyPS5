@@ -597,6 +597,9 @@ public:
 
 	void FreeDetachedThreads();
 
+	// Diagnostic snapshot of every guest thread this pool owns.
+	void DumpStates(const char* tag);
+
 private:
 	std::vector<Pthread> m_threads;
 	Common::Mutex        m_mutex;
@@ -637,10 +640,91 @@ private:
 	std::atomic<thread_dtors_func_t> m_thread_dtors = nullptr;
 };
 
+void PthreadPool::DumpStates(const char* tag) {
+	Common::LockGuard lock(m_mutex);
+
+	LOGF("[threads] %s: %zu slot(s)%c", tag, m_threads.size(), 10);
+
+	for (auto* p: m_threads) {
+		if (p == nullptr || p->free.load(std::memory_order_acquire)) {
+			continue;
+		}
+
+		uint64_t rip = 0;
+		uint64_t rsp = p->guest_host_rsp;
+		uint64_t rbp = p->guest_host_rbp;
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		const auto self = static_cast<uint64_t>(GetCurrentThreadId());
+		if (p->host_thread_id != 0 && p->host_thread_id != self) {
+			if (auto* handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE,
+			                              static_cast<DWORD>(p->host_thread_id));
+			    handle != nullptr) {
+				if (SuspendThread(handle) != static_cast<DWORD>(-1)) {
+					CONTEXT context {};
+					context.ContextFlags = CONTEXT_CONTROL;
+					if (GetThreadContext(handle, &context) != 0) {
+						rip = context.Rip;
+						rsp = context.Rsp;
+						rbp = context.Rbp;
+					}
+					ResumeThread(handle);
+				}
+				CloseHandle(handle);
+			}
+		} else if (p->host_thread_id == self) {
+			// Cannot suspend ourselves; the saved values are the last ones recorded on entry.
+			rip = 0;
+		}
+#endif
+
+		LOGF("[threads]   id=%d name=%s host=%" PRIu64 " detached=%d almost_done=%d "
+		     "rip=0x%016" PRIx64 " rsp=0x%016" PRIx64 " rbp=0x%016" PRIx64 "%c",
+		     p->unique_id, p->name.empty() ? "(unnamed)" : p->name.c_str(), p->host_thread_id,
+		     p->detached.load(std::memory_order_acquire) ? 1 : 0,
+		     p->almost_done.load(std::memory_order_acquire) ? 1 : 0, rip, rsp, rbp, 10);
+
+		// Guest frames are still on the native stack: print the top words so guest-side callers
+		// (addresses in the 0x9... guest range) can be recovered even when the thread is parked
+		// inside a host wait.
+		if (rsp >= 0x10000u && (rsp & 0x7u) == 0) {
+			// Only report words that look like guest code addresses: those are the guest return
+			// addresses, and they name the guest call path even when the thread is parked inside a
+			// host wait.
+			const auto*       words = reinterpret_cast<const uint64_t*>(rsp);
+			char              line[512];
+			int               used  = std::snprintf(line, sizeof(line), "[threads]     guest:");
+			int               shown = 0;
+			constexpr uint64_t kGuestLow  = 0x800000000ull;
+			constexpr uint64_t kGuestHigh = 0x1000000000ull;
+			for (int i = 0; i < 1024 && shown < 10 && used < static_cast<int>(sizeof(line)) - 24;
+			     i++) {
+				const auto w = words[i];
+				if (w < kGuestLow || w >= kGuestHigh) {
+					continue;
+				}
+				used += std::snprintf(line + used, sizeof(line) - static_cast<size_t>(used),
+				                      " %llx", static_cast<unsigned long long>(w));
+				shown++;
+			}
+			LOGF("%s%c", line, 10);
+		}
+	}
+}
+
 thread_local Pthread        g_pthread_self           = nullptr;
 static Pthread              g_pthread_main           = nullptr;
 PThreadContext*             g_pthread_context        = nullptr;
 thread_local uintptr_t      g_guest_entry_return_rsp = 0;
+
+void DumpGuestThreadStacks(const char* tag) {
+	if (g_pthread_context == nullptr) {
+		return;
+	}
+	if (auto* pool = g_pthread_context->GetPthreadPool(); pool != nullptr) {
+		pool->DumpStates(tag);
+	}
+}
 static std::atomic<int32_t> g_pthread_thread_id      = 0;
 
 static Common::Mutex g_guest_stack_mutex;
@@ -1032,8 +1116,7 @@ void PthreadInitSelfForMainThread() {
 	g_pthread_self->host_thread_id = os_thread_id;
 	g_pthread_main                 = g_pthread_self;
 
-	LOGF("\tPthread main self: id = %d, os_thread_id = %" PRIu64 ", stack_addr = 0x%016" PRIx64
-	     ", stack_size = %" PRIu64 "\n",
+	LOGF("\tPthread main self: id = %d, os_thread_id = %" PRIu64 ", stack_addr = 0x%016" PRIx64 "\n",
 	     g_pthread_self->unique_id, os_thread_id,
 	     reinterpret_cast<uint64_t>(g_pthread_self->attr->stack_addr),
 	     static_cast<uint64_t>(g_pthread_self->attr->stack_size));
@@ -1064,8 +1147,7 @@ void* PthreadCreateMainGuestStack() {
 	                             g_pthread_self->attr->stack_size) &
 	                            ~static_cast<uintptr_t>(0x0f));
 
-	LOGF("\tPthread main guest stack: stack_addr = 0x%016" PRIx64 ", stack_size = %" PRIu64
-	     ", stack_top = 0x%016" PRIx64 "\n",
+	LOGF("\tPthread main guest stack: stack_addr = 0x%016" PRIx64 ", stack_size = %" PRIu64 "\n",
 	     reinterpret_cast<uint64_t>(g_pthread_self->attr->stack_addr),
 	     static_cast<uint64_t>(g_pthread_self->attr->stack_size),
 	     reinterpret_cast<uint64_t>(stack_top));
@@ -3243,8 +3325,7 @@ static void* RunThread(void* arg) {
 	}
 #endif
 
-	LOGF("\tPthread run begin: %s, id = %d, os_thread_id = %" PRIu64 ", entry = 0x%016" PRIx64
-	     ", arg = 0x%016" PRIx64 ", stack_addr = 0x%016" PRIx64 ", stack_size = %" PRIu64 "\n",
+	LOGF("\tPthread run begin: %s, id = %d, os_thread_id = %" PRIu64 ", entry = 0x%016" PRIx64 ", arg = 0x%016" PRIx64 ", stack_addr = 0x%016" PRIx64 ", stack_size = %" PRIu64 "\n",
 	     thread->name.c_str(), thread->unique_id, os_thread_id,
 	     reinterpret_cast<uint64_t>(thread->entry), reinterpret_cast<uint64_t>(thread->arg),
 	     reinterpret_cast<uint64_t>(thread->attr->stack_addr),

@@ -307,6 +307,25 @@ Decision: the feature is **opt-in** (`--occlusion-queries`, default off). It is 
 
 Follow-up before this can help: establish why the proxy draws between the pair members pass depth (depth state, Hi-Z, or the wrong draw being bracketed). Until then occlusion cannot cull and the GPU-overdraw theory is unconfirmed; treat the Phase 2/3 CPU costs as the actionable levers.
 
+## Stage-loading stall - guest thread dump
+
+Added `LibKernel::DumpGuestThreadStacks`, enabled with `KYTY_THREAD_DUMP=1`: every 30 s it suspends each guest host thread, reads RIP/RSP/RBP from the host context, and scans its native stack for words that look like guest code addresses (0x8_00000000..0x10_000000000), which are the guest return addresses.
+
+It corrected an earlier misreading: the loader is **`id=50 RoomLoad_ATQT`**, not `id=42`, which is `Physics_ATQT`. The earlier "tid 42" trace was the unique-id space, not the thread that loads the room.
+
+Snapshot at ~120 s, ~30 guest threads alive. Every live thread is parked inside one host wait address, i.e. all of them are blocked in host-side mutex/condvar waits rather than executing guest code. The guest call paths recovered:
+
+```
+id=50 RoomLoad_ATQT        guest: 900011dd1 900011981 9000117a9 9000010bc
+id=48 OdxAsyncLoader       guest: 900011dd1 900da6cbb 900da6c19 9000010bc
+id=61 tbb_thead (detached) guest: 900a4c808
+id=33 PlayGo               almost_done=1, no context
+```
+
+`RoomLoad_ATQT` and `OdxAsyncLoader` share the same innermost frames (0x900011dd1, 0x9000010bc), so both sit in the same guest-side wait helper. Audio (`SceSndzAudioOutMain`, `SndzManualUpdate_ATQT`, `SoundUpdate_ATQT`), physics (`Physics_ATQT`, `Havok Worker` ×7, `HavokRigidBodiesCombiner_ATQT`) and telemetry threads exist and are likewise parked - consistent with the game being idle while it waits for the room load to complete.
+
+Not yet resolved: what completion that wait helper is waiting for, and which thread is supposed to satisfy it. The guest frames are eboot addresses with no symbol information, so naming them needs either guest-side object inspection or eboot symbol recovery.
+
 ## Stage-loading stall - state of the investigation
 
 With the file-read fix in place the guest no longer crashes at stage entry, but the stage never finishes loading: the loading animation keeps rendering at ~20 fps and controller/audio keep working, indefinitely.

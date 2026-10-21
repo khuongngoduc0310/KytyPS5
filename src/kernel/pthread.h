@@ -190,6 +190,10 @@ int KYTY_SYSV_ABI PthreadCondTimedwaitAbs(PthreadCond* cond, PthreadMutex* mutex
                                           const KernelTimespec* abstime);
 int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex);
 
+// Diagnostic: reports every guest thread with its name, ids and live host RIP/RSP/RBP.
+// Used to see where guest threads are blocked when the guest stalls.
+void DumpGuestThreadStacks(const char* tag);
+
 int KYTY_SYSV_ABI      KernelClockGetres(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp);
 int KYTY_SYSV_ABI      KernelGettimeofday(KernelTimeval* tp);

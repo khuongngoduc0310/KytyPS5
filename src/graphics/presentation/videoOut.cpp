@@ -865,6 +865,24 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 
 	int64_t total_wait = 0;
 	while (!token.stop_requested() && !m_presenter.IsDeviceLost()) {
+		// TEMPORARY: periodic guest thread-state dump so a stalled guest can be inspected
+		// (KYTY_THREAD_DUMP=1). Runs on this thread, not a guest thread.
+		{
+			static const bool dump_enabled = std::getenv("KYTY_THREAD_DUMP") != nullptr;
+			static int        last_bucket  = -1;
+			if (dump_enabled) {
+				static const auto start = std::chrono::steady_clock::now();
+				const auto        secs  = static_cast<int64_t>(
+				    std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() -
+				                                                     start)
+				        .count());
+				const auto bucket = static_cast<int>(secs / 30);
+				if (bucket != last_bucket) {
+					last_bucket = bucket;
+					Libs::LibKernel::DumpGuestThreadStacks("snapshot");
+				}
+			}
+		}
 		const auto sleep_begin = Common::Timer::QueryPerformanceCounter();
 		if (total_wait > 0) {
 			const auto remaining_us =
