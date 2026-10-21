@@ -662,7 +662,7 @@ void FpsProbeStep(Clock::time_point now, bool flip, double interval_ms) {
 	            "%6.1f | draws %llu disp %llu submits %llu | faults %llu late-vblank %llu drop "
 	            "%llu | occl ok %llu fb %llu zero %llu samples %llu | frange %llu fbyte %llu | "
 	            "prog %6.1f pipe %6.1f vtx %6.1f tgt %6.1f | srt %6.1f desc %6.1f build %6.1f "
-	            "reads %llu || prep %6.1f cget %6.1f%s",
+	            "reads %llu || prep %6.1f cget %6.1f | zbound %llu zunbound %llu%s",
 	            static_cast<double>(calls) / elapsed, avg_ms, probe.max_ms, gpu_wait,
 	            msv(Counter::ProbeProcessNs), msv(Counter::ProbeSubmitNs),
 	            msv(Counter::ProbeMaterializeNs), msv(Counter::ProbeFaultNs), shader, pipeline,
@@ -683,7 +683,9 @@ void FpsProbeStep(Clock::time_point now, bool flip, double interval_ms) {
 	            msv(Counter::ProbeSrtWalkNs), msv(Counter::ProbeDescNs),
 	            msv(Counter::ProbeBuildNs),
 	            static_cast<unsigned long long>(delta(Counter::ProbeSrtWalkReads)),
-	            msv(Counter::ProbePrepareNs), msv(Counter::ProbeCacheGetNs), "\n");
+	            msv(Counter::ProbePrepareNs), msv(Counter::ProbeCacheGetNs),
+	            static_cast<unsigned long long>(delta(Counter::DepthBoundDraws)),
+	            static_cast<unsigned long long>(delta(Counter::DepthUnboundDraws)), "\n");
 	std::fflush(stdout);
 
 	probe.window = now;

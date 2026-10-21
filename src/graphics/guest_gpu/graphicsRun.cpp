@@ -880,6 +880,40 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 		LOGF("\t draw indexed offsets: base_vertex = %" PRId32 ", first_instance = %" PRIu32 "\n",
 		     args.base_vertex, args.first_instance);
 	}
+	{
+		// TEMPORARY GPU probe: the draw that sits between a ZPASS_DONE pair is the occlusion
+		// culling test. Log the depth state it actually runs with, because every resolved count so
+		// far reports hundreds of thousands of samples and nothing is ever fully occluded.
+		static const bool probe_enabled = std::getenv("KYTY_OCCLUSION_PROBE") != nullptr;
+		static std::atomic<uint32_t> probe_logged {0};
+		if (probe_enabled && m_occlusion_open_slot >= 0 && probe_logged.load() < 64) {
+			const auto& dc  = m_ctx.GetDepthControl();
+			const auto& rt  = m_ctx.GetDepthRenderTarget();
+			const auto  seq = probe_logged.fetch_add(1);
+			std::printf("[occl] pair draw #%u slot=%d z_enable=%u z_write=%u zfunc=%u "
+			            "depth_addrs r=0x%llx w=0x%llx htile=0x%llx idx=%u inst=%u\n",
+			            seq, m_occlusion_open_slot, dc.z_enable ? 1u : 0u,
+			            dc.z_write_enable ? 1u : 0u, static_cast<uint32_t>(dc.zfunc),
+			            static_cast<unsigned long long>(rt.z_read_base_addr),
+			            static_cast<unsigned long long>(rt.z_write_base_addr),
+			            static_cast<unsigned long long>(rt.htile_data_base_addr),
+			            args.index_count, args.instance_count);
+			std::fflush(stdout);
+		}
+	}
+	{
+		// TEMPORARY GPU probe: how many draws run with depth enabled but nothing bound to test
+		// against. A high share would mean no depth testing at all, which is both a correctness and
+		// a fill-rate problem.
+		static const bool probe_enabled = std::getenv("KYTY_OCCLUSION_PROBE") != nullptr;
+		if (probe_enabled) {
+			const auto& dc       = m_ctx.GetDepthControl();
+			const auto& z        = m_ctx.GetDepthRenderTarget();
+			const bool  unbound  = dc.z_enable && z.z_read_base_addr == 0 && z.z_write_base_addr == 0;
+			Common::DebugCounters::Add(unbound ? Common::DebugCounters::Counter::DepthUnboundDraws
+			                                   : Common::DebugCounters::Counter::DepthBoundDraws);
+		}
+	}
 	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
 }
 

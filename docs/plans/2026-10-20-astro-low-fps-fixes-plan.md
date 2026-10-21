@@ -214,6 +214,26 @@ Two conclusions:
 
 Caveat: the fps move is confounded by scene variance (dispatch rate differed between windows). The trustworthy result is `fault` ms/s, which is a direct measurement of the handler.
 
+### GPU-side root cause of the inert occlusion queries
+
+Probes: `KYTY_OCCLUSION_PROBE=1` logs the depth state of the draw between each `ZPASS_DONE` pair, and tallies every draw as depth-bound or depth-unbound.
+
+Depth tracking itself is healthy: 98-100% of draws in heavy windows (14-26 k draws/s) resolve with a real depth attachment, and only 0-2.4% are unbound.
+
+The occlusion cull draws are the anomaly. All 64 sampled pair draws report:
+
+```
+z_enable=1 z_write=0 zfunc=3 depth_addrs r=0x0 w=0x0 htile=0x0 idx=6 inst=1
+```
+
+Depth test enabled, a 6-index quad (2 triangles, full-screen-ish given ~3.7 M samples/query), but **no depth surface bound**. `ResolveRenderDepthTarget` sees `z_read_base_addr == 0 && z_write_base_addr == 0`, classifies the attachment as unbound and returns without a depth attachment, so the depth test does nothing and every rasterised sample passes. That is exactly why every query reports "visible": there is nothing to be occluded by.
+
+So the ordering is: no culling -> the guest submits every object -> ~15-25 k draws/s -> GPU-bound (`gpu-wait` 660-1190 ms/s of a ~1000 ms/s thread budget). The inactive occlusion queries are a *cause* of the GPU load, not a separate issue.
+
+`ApplyContextStateOperation` copies the whole context on push/pop, so push/pop is faithful. `Clear` and `PushClear` wipe it, including `m_depth_render_target`. The leading suspect is a cull pass that runs inside a cleared context and expects the depth base to survive, which the emulator cannot reproduce.
+
+Next measurement, if wanted: count `DB_Z_READ_BASE`/`DB_Z_WRITE_BASE` writes by value and the context-state operations around each pair draw, to prove whether the base is cleared (emulator modelling) or simply never emitted (guest behaviour).
+
 ### Phase 1 result - implemented, faithful, currently inert
 
 Implementation: `RenderContext` owns a `VK_QUERY_TYPE_OCCLUSION` pool of 64 queries; slots are keyed by the pair base address; the pair-first event issues `vkCmdBeginQuery`, the pair-second issues `vkCmdEndQuery`; the count is read from a deferred priority operation one cycle later.

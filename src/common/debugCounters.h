@@ -61,6 +61,8 @@ enum class Counter {
 	ProbeSrtWalkReads,  // Sum of srt_reads evaluated, to correlate walk cost.
 	ProbePrepareNs,     // PrepareProgram (shader map lookup and state decode).
 	ProbeCacheGetNs,    // ProgramCache::Get wrapper around the materialiser.
+	DepthBoundDraws,    // Draws resolved with a real depth attachment.
+	DepthUnboundDraws,  // Draws with depth test enabled but no bound depth attachment.
 	// TEMPORARY: phase attribution for the KYTY_FPS_PROBE diagnostic.
 	ProbeSubmitNs,
 	ProbeFaultNs,
