@@ -307,6 +307,32 @@ Decision: the feature is **opt-in** (`--occlusion-queries`, default off). It is 
 
 Follow-up before this can help: establish why the proxy draws between the pair members pass depth (depth state, Hi-Z, or the wrong draw being bracketed). Until then occlusion cannot cull and the GPU-overdraw theory is unconfirmed; treat the Phase 2/3 CPU costs as the actionable levers.
 
+## Stage-loading crash - root cause and fix
+
+Entering the hub crash-site stage killed the emulator. Guest thread `RoomLoad_ATQT` / `ProductNextLoad_ATQT` dereferenced null (`0x28`, then `0xffffffffffffffff`), after the game logged:
+
+```
+Xml file "data/prein/levels/hub_crashsite_island_4/32D593B1-....lvx" is broken and failed to load
+```
+
+The file is present and complete (2,227,437 bytes, ends with `</Level>`). The emulator log showed why:
+
+```
+Read 0 bytes (asked 2227437, pos 0, size 2227437) from: .../32D593B1-....lvx
+```
+
+A full-size read at offset 0 returned zero. `ReadFile` failed with `ERROR_INVALID_USER_BUFFER` (1784), and `SysFileRead` discarded the error, so the file layer reported EOF:
+
+```
+buf=0x100e603700 first(state=COMMIT protect=PAGE_READWRITE) last(state=COMMIT protect=PAGE_READONLY)
+```
+
+The destination is committed and starts writable but **ends in a `PAGE_READONLY` page** - a GPU page watcher. `ReadFile` probes the whole range before copying and refuses any range it cannot write end to end. Guest writes never hit this because a user-mode write faults, and the access-violation handler unprotects the page; a kernel-mode copy fails instead. This was not specific to the level file: 528 KB and 4.8 KB reads failed the same way, so loads were being silently truncated all along.
+
+Fix: `ReadIntoGuestMemory` stages guest reads through a bounded buffer and `memcpy`s into guest memory, so the write takes the normal fault path and the page is unprotected exactly as for guest code. Applied to `KernelRead` and `KernelPread`. `SysFileRead` now also logs a failed `ReadFile` with its error code and the destination page state instead of reporting EOF.
+
+Verification (300 s run): `ReadFile failures 0`, `Xml broken 0`, the 2.2 MB level read returns its full size, no guest fault, and the run continued to VS118 before the 5-minute pipeline-cache checkpoint.
+
 ## Product Contract
 
 ### Requirements

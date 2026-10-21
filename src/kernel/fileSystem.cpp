@@ -616,6 +616,43 @@ int KYTY_SYSV_ABI KernelFcntl(int d, int command, int arg) {
 	}
 }
 
+
+// ReadFile (and the POSIX equivalents) reject a destination range the kernel cannot probe as
+// fully writable. Guest buffers routinely sit behind GPU page watchers, so the tail of a buffer is
+// often PAGE_READONLY and the whole read fails with ERROR_INVALID_USER_BUFFER - which the file
+// layer then reports as a zero-length read, looking like EOF. Copying through a staging buffer
+// turns that into an ordinary user-mode write, which the existing access-violation handler
+// resolves by unprotecting the page exactly as it does for guest writes.
+static void ReadIntoGuestMemory(Common::File& file, void* buf, uint32_t nbytes,
+                                uint32_t* bytes_read) {
+	constexpr uint32_t kChunk = 64u * 1024u;
+	// Always stage, even for small reads: a short buffer can sit entirely inside one watcher page,
+	// and ReadFile then fails outright rather than at a page boundary.
+	if (nbytes == 0u) {
+		if (bytes_read != nullptr) {
+			*bytes_read = 0;
+		}
+		return;
+	}
+
+	std::vector<uint8_t> staging(std::min(nbytes, kChunk));
+	auto*                out   = static_cast<uint8_t*>(buf);
+	uint32_t             total = 0;
+	while (total < nbytes) {
+		const auto want = std::min<uint32_t>(static_cast<uint32_t>(staging.size()), nbytes - total);
+		uint32_t   got  = 0;
+		file.Read(staging.data(), want, &got);
+		if (got == 0u) {
+			break;
+		}
+		std::memcpy(out + total, staging.data(), got);
+		total += got;
+	}
+	if (bytes_read != nullptr) {
+		*bytes_read = total;
+	}
+}
+
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	PRINT_NAME();
 
@@ -669,7 +706,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buf),
 	                         std::min<uint64_t>(nbytes, remaining));
 	uint32_t bytes_read = 0;
-	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
+	ReadIntoGuestMemory(file->f, buf, static_cast<uint32_t>(nbytes), &bytes_read);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes_read);
 
 	file->mutex.Unlock();
@@ -679,7 +716,8 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 		return KERNEL_ERROR_EIO;
 	}
 
-	LOGF("\tRead %u bytes from: %s\n", bytes_read, Common::PathToString(file->real_name).c_str());
+	LOGF("\tRead %u bytes (asked %zu, pos %" PRId64 ", size %" PRId64 ") from: %s\n",
+	     bytes_read, nbytes, pos, file_size, Common::PathToString(file->real_name).c_str());
 
 	return bytes_read;
 }
@@ -797,7 +835,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	                         std::min<uint64_t>(nbytes, remaining));
 	uint32_t bytes_read = 0;
 	file->f.Seek(offset);
-	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
+	ReadIntoGuestMemory(file->f, buf, static_cast<uint32_t>(nbytes), &bytes_read);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes_read);
 	file->f.Seek(pos);
 

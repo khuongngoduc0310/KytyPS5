@@ -9,6 +9,7 @@
 #endif
 #include <windows.h> // IWYU pragma: keep
 
+#include "common/logging/log.h"
 #include "common/platform/sysFileIO.h"
 #include "common/platform/sysTimer.h"
 #include "common/stringUtils.h"
@@ -66,7 +67,25 @@ static DWORD GetCacheAccessType(sys_file_cache_type_t t) {
 void SysFileRead(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read) {
 	if (f.type == SYS_FILE_FILE) {
 		DWORD w = 0;
-		ReadFile(f.handle, data, size, &w, nullptr);
+		if (::ReadFile(f.handle, data, size, &w, nullptr) == 0) {
+			// A failed host read used to be indistinguishable from EOF, which turns a protection
+			// problem into a silently truncated file for the guest.
+			const auto error = ::GetLastError();
+			if (error != ERROR_HANDLE_EOF) {
+				MEMORY_BASIC_INFORMATION first {};
+				MEMORY_BASIC_INFORMATION last {};
+				::VirtualQuery(data, &first, sizeof(first));
+				::VirtualQuery(static_cast<const uint8_t*>(data) + (size > 0u ? size - 1u : 0u), &last,
+				               sizeof(last));
+				LOGF("SysFileRead: ReadFile failed size=%u read=%lu error=%lu buf=%p "
+				     "first(state=0x%lx protect=0x%lx) last(state=0x%lx protect=0x%lx)\n",
+				     size, static_cast<unsigned long>(w), static_cast<unsigned long>(error), data,
+				     static_cast<unsigned long>(first.State),
+				     static_cast<unsigned long>(first.Protect),
+				     static_cast<unsigned long>(last.State),
+				     static_cast<unsigned long>(last.Protect));
+			}
+		}
 		if (bytes_read != nullptr) {
 			*bytes_read = w;
 		}
