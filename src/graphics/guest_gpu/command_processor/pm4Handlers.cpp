@@ -52,6 +52,9 @@
 
 namespace Libs::Graphics {
 
+// TEMPORARY GPU probe: defined in graphicsRun.cpp, serialises all probe traces.
+extern std::atomic<uint64_t> g_occlusion_probe_event;
+
 namespace {
 
 constexpr uint32_t GcrGl2MetadataInvalidate = 1u << 1u;
@@ -102,7 +105,9 @@ static void DepthBaseProbeLog(const char* what, uint64_t base, uint32_t raw) {
 	if (logged.fetch_add(1) >= 48u) {
 		return;
 	}
-	std::printf("[zbase] %s base=0x%llx raw=0x%x\n", what,
+	const auto event = g_occlusion_probe_event.fetch_add(1, std::memory_order_relaxed);
+	std::printf("[ev %llu] zbase %s base=0x%llx raw=0x%x\n",
+	            static_cast<unsigned long long>(event), what,
 	            static_cast<unsigned long long>(base), raw);
 	std::fflush(stdout);
 }

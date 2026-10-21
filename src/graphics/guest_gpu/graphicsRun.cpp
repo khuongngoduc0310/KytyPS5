@@ -35,6 +35,10 @@
 
 namespace Libs::Graphics {
 
+// TEMPORARY GPU probe: single monotonic event counter shared by the depth-base, context-state and
+// occlusion traces so their relative ordering is visible across translation units.
+std::atomic<uint64_t> g_occlusion_probe_event {0};
+
 static thread_local CommandProcessor* g_current_processor = nullptr;
 static thread_local Pm4Execution*     g_current_execution = nullptr;
 static thread_local bool              g_gpu_thread        = false;
@@ -232,7 +236,9 @@ void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operatio
 	                      operation == ContextStateOperation::PushClear) &&
 	    probe_logged.fetch_add(1) < 32u) {
 		const auto& before = m_ctx.GetDepthRenderTarget();
-		std::printf("[ctx] %s base_before r=0x%llx w=0x%llx z_enable=%u\n",
+		const auto  event  = g_occlusion_probe_event.fetch_add(1, std::memory_order_relaxed);
+		std::printf("[ev %llu] ctx %s base_before r=0x%llx w=0x%llx z_enable=%u\n",
+		            static_cast<unsigned long long>(event),
 		            operation == ContextStateOperation::Clear ? "clear" : "push-clear",
 		            static_cast<unsigned long long>(before.z_read_base_addr),
 		            static_cast<unsigned long long>(before.z_write_base_addr),
@@ -903,10 +909,12 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 		if (probe_enabled && m_occlusion_open_slot >= 0 && probe_logged.load() < 64) {
 			const auto& dc  = m_ctx.GetDepthControl();
 			const auto& rt  = m_ctx.GetDepthRenderTarget();
-			const auto  seq = probe_logged.fetch_add(1);
-			std::printf("[occl] pair draw #%u slot=%d z_enable=%u z_write=%u zfunc=%u "
+			const auto  seq   = probe_logged.fetch_add(1);
+			const auto  event = g_occlusion_probe_event.fetch_add(1, std::memory_order_relaxed);
+			std::printf("[ev %llu] cull-draw #%u slot=%d z_enable=%u z_write=%u zfunc=%u "
 			            "depth_addrs r=0x%llx w=0x%llx htile=0x%llx idx=%u inst=%u\n",
-			            seq, m_occlusion_open_slot, dc.z_enable ? 1u : 0u,
+			            static_cast<unsigned long long>(event), seq, m_occlusion_open_slot,
+			            dc.z_enable ? 1u : 0u,
 			            dc.z_write_enable ? 1u : 0u, static_cast<uint32_t>(dc.zfunc),
 			            static_cast<unsigned long long>(rt.z_read_base_addr),
 			            static_cast<unsigned long long>(rt.z_write_base_addr),

@@ -214,6 +214,31 @@ Two conclusions:
 
 Caveat: the fps move is confounded by scene variance (dispatch rate differed between windows). The trustworthy result is `fault` ms/s, which is a direct measurement of the handler.
 
+### Depth-base trace, sequenced - the ambiguity is resolved
+
+A monotonic event id on all three traces gives the ordering:
+
+```
+[ev 60] zbase z-write-lo base=0x513560000      <- real depth bound
+[ev 61] zbase z-read-hi  base=0x513560000
+[ev 62] zbase z-write-hi base=0x513560000
+[ev 63] ctx push-clear base_before r=0x0      w=0x0
+[ev 64] ctx push-clear base_before r=0x0      w=0x0
+[ev 65] ctx push-clear base_before r=0x513560000 w=0x513560000 z_enable=1
+...
+[ev 69] ctx clear      base_before r=0x513560000 w=0x513560000   <- wipes a live binding
+[ev 70] ctx clear      base_before r=0x0      w=0x0
+[ev 71..79] push-clear/clear, base 0
+[ev 80] cull-draw #0 slot=0 z_enable=1 ... depth_addrs r=0x0 w=0x0
+[ev 81..]  cull-draw #1..   same
+```
+
+So the cull draws inherit a depth binding that was wiped by a `context state op` and not re-emitted, not a binding the guest never made. Push/pop is otherwise faithful - `[ev 69]` shows `0x513560000` alive again after the push-clear at `ev 65`, i.e. save/restore works.
+
+Hypothesis: on hardware the guest's context-state CLEAR does not drop `DB_Z_READ_BASE`/`DB_Z_WRITE_BASE`, because the guest proceeds to draw with `z_enable=1` and does not re-emit them. The emulator's `Clear` does `*this = Context()`, which drops the depth attachment, so the cull pass ends up depth-less and every query reports visible.
+
+This is a hypothesis and not yet a fix. The candidate experiment is to keep `m_depth_render_target` across `Clear` only (not `PushClear`), behind an env switch so the two modes can be compared in one build. It is the same *class* of change as fixes B and A - state semantics rather than measured overhead - so it needs an A/B run and a visual sanity check, not a commit on reasoning alone.
+
 ### Depth-base trace - ambiguity remains, no fix attempted
 
 Traced `DB_Z_READ_BASE`/`DB_Z_WRITE_BASE` (lo and hi) writes and context-state operations.
