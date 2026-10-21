@@ -84,6 +84,19 @@ With B enabled the emulator stalls at the same boot point every time - one ~1.2 
 
 Why it fails is not yet established. Two candidate explanations: the fast path skipped `MaterializeResources`' per-call reset of `resource_plan.selector_keys[].resolved`, or a descriptor genuinely still varied for a plan the predicate admitted. Either way the predicate was proven insufficient by execution, so the code is removed rather than left behind a flag.
 
+### Fix A result - reverted as well
+
+Per-permutation memo key (hash of shader_base, indirect args, push-data cursor, workgroup counts, call-source revision and all user-data words), storing each permutation's own `ResourceSnapshot`, with the `selector_keys` reset reproduced on the hit path. Same binary, same command, 300 s each:
+
+| mode | last shaders reached | max draws/s | device lost | windows |
+|---|---|---|---|---|
+| memo on | VS53 / PS64 / CS65 / GS5 | 9839 | 2 | 41 (stalled) |
+| memo off | VS145 / PS125 / CS95 / GS7 | 22931 | 0 | 296 |
+
+So A fails the same way B did, and further than B before it does. Conclusion: caching the materialised specialization is not sound against this codebase as-is. Both attempts skip `MaterializeResources`, and something it produces beyond `resources`/`specialization` is consumed by later stages - the mutable per-plan state (`selector_keys`, `material_keys`, the evaluation scratch) is the likely carrier, since upstream added indexed material keys for pointer-table image selection.
+
+Stop condition honoured: two independent attempts at the same cache both produced deterministic device loss, so no third blind attempt. The per-draw materialisation appears to be inherent to upstream's design; the remaining lever is its internal cost, not skipping it.
+
 ### The surviving win - the memory-probe regression fix
 
 The other half of that change was sound and is kept: `SrtReadCapture::ReadOrdinary` called `HostMemoryRangeIsReadable` per SRT read, and that helper does a `VirtualQuery` on Windows and opens `/proc/self/maps` on Linux. Resource materialisation runs per draw and per stage, so the probe sat on a very hot path. It is replaced by a single integer compare against a 4 GiB guest-address floor, which still rejects the non-guest `0x18` case that motivated the guard.
